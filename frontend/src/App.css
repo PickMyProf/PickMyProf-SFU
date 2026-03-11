@@ -1,42 +1,146 @@
-#root {
-  max-width: 1280px;
-  margin: 0 auto;
-  padding: 2rem;
+/* app css */
+.app-root {
+  width: 100%;
+  min-height: 100vh;
+  background: linear-gradient(180deg, #ffffff 0%, #fbf7f8 100%);
+}
+
+/* Landing page css */
+.splash-screen {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background: #ffffff;
+  opacity: 1;
+  transition: opacity 0.9s ease;
+  z-index: 9999;
+  padding: 24px;
+  padding-bottom: 20vh;
+  gap: 0;
+}
+
+.splash-screen.fade-out {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 1.2s ease;
+}
+
+.splash-logo {
+  width: min(900px, 88vw);
+  height: auto;
+  display: block;
+  filter: drop-shadow(0 8px 24px rgba(122, 0, 25, 0.10));
+  animation: floatIn 1s cubic-bezier(0.16, 1, 0.3, 1) both;
+  position: relative;
+}
+
+.splash-logo-wrapper {
+  position: relative;
+  display: inline-block;
+}
+
+.splash-logo-wrapper::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    105deg,
+    transparent 40%,
+    rgba(255, 255, 255, 0.55) 50%,
+    transparent 60%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 2.4s ease 1s both;
+  pointer-events: none;
+  border-radius: 4px;
+}
+
+.splash-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+}
+
+/* Loading dots css */
+.dot-indicators {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 4px;
+}
+
+.dot-indicators span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: rgba(122, 0, 25, 0.15);
+  transition: background 0.4s ease, transform 0.4s ease;
+}
+
+.dot-indicators span.active {
+  background: #7a0019;
+  transform: scale(1.25);
+}
+
+/* typing css */
+.typing-text {
+  font-size: clamp(1.1rem, 1.8vw, 1.75rem);
+  font-weight: 500;
+  line-height: 1.5;
+  letter-spacing: -0.01em;
+  color: #5a0013;
   text-align: center;
+  width: 100%;
+  max-width: none;
+  padding: 0 48px;
+  min-height: 56px;
+  margin-top: -100px;
+  opacity: 0;
+  animation: textFadeUp 0.6s ease 1s forwards;
 }
 
-.logo {
-  height: 6em;
-  padding: 1.5em;
-  will-change: filter;
-  transition: filter 300ms;
-}
-.logo:hover {
-  filter: drop-shadow(0 0 2em #646cffaa);
-}
-.logo.react:hover {
-  filter: drop-shadow(0 0 2em #61dafbaa);
+.cursor {
+  display: inline-block;
+  margin-left: 2px;
+  color: #c0203f;
+  font-weight: 300;
+  opacity: 0.7;
+  animation: blink 0.85s step-end infinite;
 }
 
-@keyframes logo-spin {
+/* keyframe effects */
+@keyframes blink {
+  50% { opacity: 0; }
+}
+
+@keyframes floatIn {
   from {
-    transform: rotate(0deg);
+    opacity: 0;
+    transform: translateY(20px) scale(0.98);
   }
   to {
-    transform: rotate(360deg);
+    opacity: 1;
+    transform: translateY(0) scale(1);
   }
 }
 
-@media (prefers-reduced-motion: no-preference) {
-  a:nth-of-type(2) .logo {
-    animation: logo-spin infinite 20s linear;
+@keyframes textFadeUp {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
   }
 }
 
-.card {
-  padding: 2em;
-}
-
-.read-the-docs {
-  color: #888;
+@keyframes shimmer {
+  0%   { background-position: 200% center; opacity: 0; }
+  10%  { opacity: 1; }
+  100% { background-position: -200% center; opacity: 0; }
 }
