@@ -30,6 +30,14 @@ def root():
     return {"message": "PickMyProf backend is running on port 8000"}
 
 
+@app.get("/debug/columns/{table}")
+def debug_columns(table: str):
+    allowed = {"review", "studentuser", "ratingscore", "ratingcriterion", "tag", "tagged_with"}
+    if table not in allowed:
+        raise HTTPException(400, "not allowed")
+    return fetch_all(f"SHOW COLUMNS FROM `{table}`", ())
+
+
 @app.get("/health/db")
 def health_db():
     try:
@@ -387,8 +395,6 @@ def get_professor_reviews(prof_id: int, status: str = "APPROVED"):
         SELECT
             r.review_id,
             r.source,
-            r.student_id,
-            su.username AS student_username,
             r.prof_id,
             r.external_prof_id,
             r.review_text,
@@ -404,13 +410,12 @@ def get_professor_reviews(prof_id: int, status: str = "APPROVED"):
                 r.prof_id = p.prof_id
                 OR (pem.external_prof_id IS NOT NULL AND r.external_prof_id = pem.external_prof_id)
             )
-        LEFT JOIN studentuser su ON su.student_id = r.student_id
         LEFT JOIN ratingscore rs ON rs.review_id = r.review_id
         LEFT JOIN tagged_with tw ON tw.review_id = r.review_id
         LEFT JOIN tag t ON t.tag_id = tw.tag_id
         WHERE p.prof_id = %s AND r.status = %s
         GROUP BY
-            r.review_id, r.source, r.student_id, su.username,
+            r.review_id, r.source,
             r.prof_id, r.external_prof_id,
             r.review_text, r.course_code_raw, r.status, r.created_at
         ORDER BY r.created_at DESC
@@ -424,7 +429,7 @@ def get_review_details(review_id: int):
     review = fetch_one(
         """
         SELECT
-            review_id, source, student_id, prof_id, external_prof_id,
+            review_id, source, prof_id, external_prof_id,
             review_text, course_code_raw, status, created_at
         FROM review
         WHERE review_id = %s
