@@ -1,102 +1,46 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import "./App.css";
 import PMPLogo from "./assets/PMPLogo.png";
+import { fetchCourses, searchOfferings, fetchProfessorStats, fetchProfessorReviews } from "./api";
 
 function App() {
   const [fadeOut, setFadeOut] = useState(false);
   const [showHome, setShowHome] = useState(false);
   const [typedText, setTypedText] = useState("");
   const [activeDot, setActiveDot] = useState(0);
+
+  // Course search
   const [searchTerm, setSearchTerm] = useState("");
-  const [selectedTerm, setSelectedTerm] = useState("All");
-  const [selectedMode, setSelectedMode] = useState("All");
+  const [courses, setCourses] = useState([]);
+  const [loadingCourses, setLoadingCourses] = useState(false);
+
+  // Selected course → offerings
+  const [selectedCourse, setSelectedCourse] = useState(null);
+  const [offerings, setOfferings] = useState([]);
+  const [loadingOfferings, setLoadingOfferings] = useState(false);
+
+  // Selected professor → details + reviews
+  const [selectedProf, setSelectedProf] = useState(null);
+  const [profStats, setProfStats] = useState(null);
+  const [profReviews, setProfReviews] = useState([]);
+  const [loadingProf, setLoadingProf] = useState(false);
 
   const fullText =
     "Welcome to the one place for SFU schedules and professor insights.";
 
-  const courses = [
-    {
-      id: 1,
-      courseNumber: "CMPT 120",
-      courseTitle: "Introduction to Computing Science and Programming I",
-      year: 2025,
-      term: "Spring",
-      section: "D100",
-      deliveryMode: "In Person",
-      professor: "Brian Fraser",
-      rating: 4.5,
-      tags: ["clear explanations", "helpful"],
-    },
-    {
-      id: 2,
-      courseNumber: "CMPT 125",
-      courseTitle: "Introduction to Computing Science and Programming II",
-      year: 2025,
-      term: "Spring",
-      section: "D200",
-      deliveryMode: "In Person",
-      professor: "Geoffrey Tien",
-      rating: 4.0,
-      tags: ["tough grader"],
-    },
-    {
-      id: 3,
-      courseNumber: "CMPT 225",
-      courseTitle: "Data Structures and Programming",
-      year: 2025,
-      term: "Summer",
-      section: "D100",
-      deliveryMode: "Online",
-      professor: "Manolis Savva",
-      rating: 4.3,
-      tags: ["organized"],
-    },
-    {
-      id: 4,
-      courseNumber: "CMPT 276",
-      courseTitle: "Introduction to Software Engineering",
-      year: 2025,
-      term: "Fall",
-      section: "D100",
-      deliveryMode: "In Person",
-      professor: "Parmit Chilana",
-      rating: 4.8,
-      tags: ["helpful"],
-    },
-    {
-      id: 5,
-      courseNumber: "CMPT 307",
-      courseTitle: "Data Structures and Algorithms",
-      year: 2026,
-      term: "Spring",
-      section: "D100",
-      deliveryMode: "Hybrid",
-      professor: "TBA",
-      rating: 3.7,
-      tags: ["exam heavy"],
-    },
-  ];
-
+  // Splash animation
   useEffect(() => {
     let index = 0;
-
     const startDelay = setTimeout(() => {
       const typingInterval = setInterval(() => {
         setTypedText(fullText.slice(0, index + 1));
         index++;
-        if (index === fullText.length) {
-          clearInterval(typingInterval);
-        }
+        if (index === fullText.length) clearInterval(typingInterval);
       }, 38);
     }, 1100);
-
-    const dotInterval = setInterval(() => {
-      setActiveDot((d) => (d + 1) % 3);
-    }, 900);
-
+    const dotInterval = setInterval(() => setActiveDot((d) => (d + 1) % 3), 900);
     const fadeTimer = setTimeout(() => setFadeOut(true), 4400);
     const showHomeTimer = setTimeout(() => setShowHome(true), 5200);
-
     return () => {
       clearTimeout(startDelay);
       clearInterval(dotInterval);
@@ -105,26 +49,75 @@ function App() {
     };
   }, []);
 
-  const filteredCourses = useMemo(() => {
-    return courses.filter((course) => {
-      const matchesSearch =
-        course.courseNumber.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        course.courseTitle.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        course.professor.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        course.term.toLowerCase().includes(searchTerm.toLowerCase());
+  // Search courses from backend (debounced)
+  const loadCourses = useCallback(async () => {
+    if (!searchTerm.trim()) { setCourses([]); return; }
+    setLoadingCourses(true);
+    try {
+      const data = await fetchCourses(searchTerm);
+      setCourses(data);
+    } catch { setCourses([]); }
+    finally { setLoadingCourses(false); }
+  }, [searchTerm]);
 
-      const matchesTerm =
-        selectedTerm === "All" || course.term === selectedTerm;
+  useEffect(() => {
+    const t = setTimeout(loadCourses, 300);
+    return () => clearTimeout(t);
+  }, [loadCourses]);
 
-      const matchesMode =
-        selectedMode === "All" || course.deliveryMode === selectedMode;
+  // When a course is selected, fetch its offerings
+  const handleSelectCourse = async (course) => {
+    setSelectedCourse(course);
+    setSelectedProf(null);
+    setProfStats(null);
+    setProfReviews([]);
+    setLoadingOfferings(true);
+    try {
+      const data = await searchOfferings({ search: course.course_number });
+      setOfferings(data.filter((o) => String(o.course_id) === String(course.course_id)));
+    } catch { setOfferings([]); }
+    finally { setLoadingOfferings(false); }
+  };
 
-      return matchesSearch && matchesTerm && matchesMode;
-    });
-  }, [searchTerm, selectedTerm, selectedMode]);
+  // When a professor is clicked, fetch their stats + reviews
+  const handleSelectProf = async (profId, profName) => {
+    setSelectedProf({ prof_id: profId, prof_name: profName });
+    setLoadingProf(true);
+    try {
+      const [stats, reviews] = await Promise.all([
+        fetchProfessorStats(profId),
+        fetchProfessorReviews(profId),
+      ]);
+      setProfStats(stats);
+      setProfReviews(reviews);
+    } catch { setProfStats(null); setProfReviews([]); }
+    finally { setLoadingProf(false); }
+  };
+
+  // Get unique professors from offerings
+  const uniqueProfs = selectedCourse
+    ? Object.values(
+        offerings.reduce((acc, o) => {
+          if (!acc[o.prof_id]) {
+            acc[o.prof_id] = {
+              prof_id: o.prof_id,
+              prof_name: o.prof_name,
+              rmp_avg_rating: o.rmp_avg_rating,
+              rmp_avg_difficulty: o.rmp_avg_difficulty,
+              app_overall_rating: o.app_overall_rating,
+              app_review_count: o.app_review_count,
+              sections: [],
+            };
+          }
+          acc[o.prof_id].sections.push(o);
+          return acc;
+        }, {})
+      )
+    : [];
 
   return (
     <div className="app-root">
+      {/* ── Splash Screen ── */}
       <div className={`splash-screen ${fadeOut ? "fade-out" : ""}`}>
         <div className="splash-content">
           <div className="splash-logo-wrapper">
@@ -142,112 +135,205 @@ function App() {
         </div>
       </div>
 
+      {/* ── Main App ── */}
       <main className={`home-page ${showHome ? "show" : ""}`}>
-        <section className="hero-section">
-          <div className="hero-text">
-            <h1>PickMyProf SFU</h1>
-            <p className="hero-description">
-              Browse SFU course offerings with professor insights, ratings, tags,
-              and section details all in one place.
-            </p>
+        {/* Navbar */}
+        <header className="topbar">
+          <div className="topbar-brand">
+            <img src={PMPLogo} alt="Logo" className="topbar-logo" />
+            <span>PickMyProf SFU</span>
           </div>
+        </header>
 
-          <div className="hero-search-card">
-            <h2>Find a course section</h2>
-            <input
-              type="text"
-              placeholder="Search course, professor, or term"
-              value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
-            />
+        {/* 3-Panel Layout: Search | Professors | Reviews */}
+        <div className="panels">
+          {/* ─── LEFT (1/3): Course Search ─── */}
+          <div className="panel panel-left">
+            <div className="panel-header">
+              <h2>Search Courses</h2>
+            </div>
+            <div className="search-input-wrap">
+              <svg className="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+              <input
+                type="text"
+                className="search-input"
+                placeholder="e.g. 120, Data Structures, CMPT 225…"
+                value={searchTerm}
+                onChange={(e) => { setSearchTerm(e.target.value); setSelectedCourse(null); setSelectedProf(null); }}
+              />
+            </div>
 
-            <div className="filter-row">
-              <select
-                value={selectedTerm}
-                onChange={(e) => setSelectedTerm(e.target.value)}
-              >
-                <option value="All">All Terms</option>
-                <option value="Spring">Spring</option>
-                <option value="Summer">Summer</option>
-                <option value="Fall">Fall</option>
-              </select>
-
-              <select
-                value={selectedMode}
-                onChange={(e) => setSelectedMode(e.target.value)}
-              >
-                <option value="All">All Modes</option>
-                <option value="In Person">In Person</option>
-                <option value="Online">Online</option>
-                <option value="Hybrid">Hybrid</option>
-              </select>
+            <div className="course-list">
+              {!searchTerm.trim() ? (
+                <div className="panel-empty">
+                  <div className="panel-empty-icon">📚</div>
+                  <p>Type a course number or title to get started</p>
+                </div>
+              ) : loadingCourses ? (
+                <div className="panel-empty"><p>Searching…</p></div>
+              ) : courses.length === 0 ? (
+                <div className="panel-empty"><p>No courses found</p></div>
+              ) : (
+                courses.map((c) => (
+                  <button
+                    key={c.course_id}
+                    className={`course-row ${selectedCourse?.course_id === c.course_id ? "active" : ""}`}
+                    onClick={() => handleSelectCourse(c)}
+                  >
+                    <span className="course-badge">CMPT {c.course_number}</span>
+                    <span className="course-name">{c.course_title}</span>
+                    <svg className="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="9 18 15 12 9 6"/></svg>
+                  </button>
+                ))
+              )}
             </div>
           </div>
-        </section>
 
-        <section className="query-box">
-          <h3>Meaningful Query Example</h3>
-          <p>
-            Showing section offerings filtered by term, delivery mode, and search
-            keyword, along with professor and rating information.
-          </p>
-        </section>
-
-        <section className="results-section">
-          <div className="results-top">
-            <h2>Course Offerings</h2>
-            <span>{filteredCourses.length} result(s)</span>
-          </div>
-
-          <div className="course-grid">
-            {filteredCourses.length > 0 ? (
-              filteredCourses.map((course) => (
-                <div className="course-card" key={course.id}>
-                  <div className="card-header">
-                    <div>
-                      <h3>{course.courseNumber}</h3>
-                      <p className="course-title">{course.courseTitle}</p>
-                    </div>
-                    <div className="rating-pill">{course.rating}/5</div>
-                  </div>
-
-                  <div className="card-details">
-                    <p>
-                      <strong>Professor:</strong> {course.professor}
-                    </p>
-                    <p>
-                      <strong>Section:</strong> {course.section}
-                    </p>
-                    <p>
-                      <strong>Term:</strong> {course.term} {course.year}
-                    </p>
-                    <p>
-                      <strong>Delivery:</strong> {course.deliveryMode}
-                    </p>
-                  </div>
-
-                  <div className="tag-list">
-                    {course.tags.map((tag, index) => (
-                      <span className="tag" key={index}>
-                        {tag}
-                      </span>
-                    ))}
-                  </div>
-
-                  <div className="card-buttons">
-                    <button className="secondary-btn">View Details</button>
-                    <button className="primary-btn">Add to Plan</button>
-                  </div>
-                </div>
-              ))
-            ) : (
-              <div className="empty-state">
-                <h3>No matching courses found</h3>
-                <p>Try changing the search text or filters.</p>
+          {/* ─── MIDDLE (1/3): Professors & Sections ─── */}
+          <div className="panel panel-middle">
+            {!selectedCourse ? (
+              <div className="panel-empty full">
+                <div className="panel-empty-icon">👈</div>
+                <h3>Select a course</h3>
+                <p>Pick a course to see its professors and sections.</p>
               </div>
+            ) : (
+              <>
+                <div className="detail-header">
+                  <div>
+                    <h2>CMPT {selectedCourse.course_number}</h2>
+                    <p className="detail-title">{selectedCourse.course_title}</p>
+                  </div>
+                  <span className="section-count">
+                    {offerings.length} section{offerings.length !== 1 ? "s" : ""}
+                  </span>
+                </div>
+
+                <div className="prof-section">
+                  <h3 className="sub-heading">Professors</h3>
+
+                  {loadingOfferings ? (
+                    <div className="panel-empty"><p>Loading sections…</p></div>
+                  ) : uniqueProfs.length === 0 ? (
+                    <div className="panel-empty"><p>No sections found</p></div>
+                  ) : (
+                    <div className="prof-list">
+                      {uniqueProfs.map((p) => (
+                        <button
+                          key={p.prof_id}
+                          className={`prof-card ${selectedProf?.prof_id === p.prof_id ? "active" : ""}`}
+                          onClick={() => handleSelectProf(p.prof_id, p.prof_name)}
+                        >
+                          <div className="prof-avatar">{p.prof_name?.charAt(0)}</div>
+                          <div className="prof-info">
+                            <div className="prof-name">{p.prof_name}</div>
+                            <div className="prof-meta">
+                              {p.sections.map((s) => (
+                                <span key={s.offering_id} className="section-chip">
+                                  {s.section_no} · {s.term} {s.year}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                          <div className="prof-ratings">
+                            {p.rmp_avg_rating && (
+                              <span className="rating-badge rmp">{p.rmp_avg_rating} RMP</span>
+                            )}
+                            {p.app_overall_rating && (
+                              <span className="rating-badge app">{p.app_overall_rating} App</span>
+                            )}
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </>
             )}
           </div>
-        </section>
+
+          {/* ─── RIGHT (1/3): Reviews ─── */}
+          <div className="panel panel-right">
+            {!selectedProf ? (
+              <div className="panel-empty full">
+                <div className="panel-empty-icon">💬</div>
+                <h3>Reviews</h3>
+                <p>Click a professor to see their ratings and reviews.</p>
+              </div>
+            ) : loadingProf ? (
+              <div className="panel-empty full"><p>Loading professor…</p></div>
+            ) : (
+              <>
+                {/* Professor header */}
+                <div className="prof-detail-header">
+                  <div className="prof-avatar lg">{selectedProf.prof_name?.charAt(0)}</div>
+                  <div>
+                    <h3>{selectedProf.prof_name}</h3>
+                    {profStats && (
+                      <p className="prof-detail-sub">
+                        {profStats.rmp_avg_rating && `RMP: ${profStats.rmp_avg_rating}/5`}
+                        {profStats.rmp_avg_rating && profStats.app_avg_overall && " · "}
+                        {profStats.app_avg_overall && `App: ${profStats.app_avg_overall}/5`}
+                        {" · "}
+                        {profStats.app_review_count ?? 0} review{profStats.app_review_count !== 1 ? "s" : ""}
+                      </p>
+                    )}
+                  </div>
+                </div>
+
+                {/* Stats */}
+                {profStats && (
+                  <div className="stats-row">
+                    <div className="stat-box">
+                      <div className="stat-num">{profStats.app_avg_overall ?? "—"}</div>
+                      <div className="stat-lbl">Overall</div>
+                    </div>
+                    <div className="stat-box">
+                      <div className="stat-num">{profStats.app_avg_difficulty ?? "—"}</div>
+                      <div className="stat-lbl">Difficulty</div>
+                    </div>
+                    <div className="stat-box">
+                      <div className="stat-num">{profStats.rmp_avg_rating ?? "—"}</div>
+                      <div className="stat-lbl">RMP</div>
+                    </div>
+                    <div className="stat-box">
+                      <div className="stat-num">{profStats.rmp_avg_difficulty ?? "—"}</div>
+                      <div className="stat-lbl">RMP Diff</div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Reviews list */}
+                <div className="reviews-section">
+                  <h4>Reviews ({profReviews.length})</h4>
+                  {profReviews.length === 0 ? (
+                    <p className="no-reviews">No approved reviews yet.</p>
+                  ) : (
+                    profReviews.map((r) => (
+                      <div key={r.review_id} className="review-card">
+                        <div className="review-top">
+                          <span className="review-author">{r.student_username || "Anonymous"}</span>
+                          {r.overall_rating && <span className="rating-badge app">{r.overall_rating}/5</span>}
+                          <span className="review-date">
+                            {r.created_at ? new Date(r.created_at).toLocaleDateString() : ""}
+                          </span>
+                        </div>
+                        <p className="review-body">{r.review_text}</p>
+                        {r.tags && (
+                          <div className="review-tags">
+                            {r.tags.split(", ").map((t) => (
+                              <span key={t} className="tag-chip">{t}</span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    ))
+                  )}
+                </div>
+              </>
+            )}
+          </div>
+        </div>
       </main>
     </div>
   );
