@@ -422,7 +422,7 @@ function App() {
             <div className="course-list">
               {!searchTerm.trim() ? (
                 <div className="panel-empty">
-                  <div className="panel-empty-icon">[ ]</div>
+                  <div className="panel-empty-icon">📚</div>
                   <p>Type a course number or title to get started</p>
                 </div>
               ) : loadingCourses ? (
@@ -460,7 +460,7 @@ function App() {
           <div className="panel panel-middle">
             {!selectedCourse ? (
               <div className="panel-empty full">
-                <div className="panel-empty-icon">--&gt;</div>
+                <div className="panel-empty-icon">👈</div>
                 <h3>Select a course</h3>
                 <p>Pick a course to see its professors and sections.</p>
               </div>
@@ -534,7 +534,7 @@ function App() {
           <div className="panel panel-right">
             {!selectedProf ? (
               <div className="panel-empty full">
-                <div className="panel-empty-icon">...</div>
+                <div className="panel-empty-icon">💬</div>
                 <h3>Reviews</h3>
                 <p>Click a professor to see their ratings and reviews.</p>
               </div>
