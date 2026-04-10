@@ -1,36 +1,81 @@
-const API = "http://localhost:8000";
+const API = "http://127.0.0.1:8000";
 
-export async function fetchCourses(search = "") {
-  const res = await fetch(`${API}/courses?search=${encodeURIComponent(search)}`);
-  if (!res.ok) throw new Error("Failed to fetch courses");
-  return res.json();
+async function request(path, options = {}) {
+  const response = await fetch(`${API}${path}`, {
+    headers: {
+      "Content-Type": "application/json",
+      ...(options.headers || {}),
+    },
+    ...options,
+  });
+
+  if (!response.ok) {
+    let detail = "Request failed";
+    try {
+      const payload = await response.json();
+      detail = payload.detail || payload.message || detail;
+    } catch {
+      detail = response.statusText || detail;
+    }
+    throw new Error(detail);
+  }
+
+  return response.json();
 }
 
-export async function searchOfferings({ search = "", term = "", delivery_mode = "", year = null }) {
+export async function fetchCourses(search = "") {
+  return request(`/courses?search=${encodeURIComponent(search)}`);
+}
+
+export async function searchOfferings({
+  search = "",
+  term = "",
+  delivery_mode = "",
+  year = null,
+}) {
   const params = new URLSearchParams();
   if (search) params.set("search", search);
   if (term) params.set("term", term);
   if (delivery_mode) params.set("delivery_mode", delivery_mode);
   if (year) params.set("year", year);
-  const res = await fetch(`${API}/offerings/search?${params}`);
-  if (!res.ok) throw new Error("Failed to search offerings");
-  return res.json();
+  return request(`/offerings/search?${params}`);
 }
 
 export async function fetchProfessor(profId) {
-  const res = await fetch(`${API}/professors/${profId}`);
-  if (!res.ok) throw new Error("Failed to fetch professor");
-  return res.json();
+  return request(`/professors/${profId}`);
 }
 
 export async function fetchProfessorReviews(profId) {
-  const res = await fetch(`${API}/professors/${profId}/reviews`);
-  if (!res.ok) throw new Error("Failed to fetch reviews");
-  return res.json();
+  return request(`/professors/${profId}/reviews`);
 }
 
 export async function fetchProfessorStats(profId) {
-  const res = await fetch(`${API}/analytics/professors/${profId}/stats`);
-  if (!res.ok) throw new Error("Failed to fetch professor stats");
-  return res.json();
+  return request(`/analytics/professors/${profId}/stats`);
+}
+
+export async function loginAccount(payload) {
+  return request("/auth/login", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function registerAccount(payload) {
+  return request("/auth/register", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function updateUserAccount(userId, payload) {
+  return request(`/users/${userId}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function deleteUserAccount(userId) {
+  return request(`/users/${userId}`, {
+    method: "DELETE",
+  });
 }

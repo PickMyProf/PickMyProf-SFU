@@ -19,6 +19,8 @@ app.add_middleware(
 _seed_running = False
 _external_seed_running = False
 OVERALL_CRITERION_ID = 1
+ACCOUNT_ROLE_STUDENT = "STUDENT"
+ACCOUNT_ROLE_MODERATOR = "MODERATOR"
 
 
 # =========================================================
@@ -28,6 +30,11 @@ OVERALL_CRITERION_ID = 1
 @app.get("/")
 def root():
     return {"message": "PickMyProf backend is running on port 8000"}
+
+
+@app.on_event("startup")
+def startup_tasks():
+    ensure_cascade_constraints()
 
 
 @app.get("/debug/columns/{table}")
@@ -135,12 +142,110 @@ def execute_write(sql: str, params: tuple = ()):
         conn.close()
 
 
+def fetch_account_by_user_id(user_id: int):
+    return fetch_one(
+        """
+        SELECT
+            u.user_id,
+            u.email,
+            u.display_name,
+            CASE
+                WHEN s.user_id IS NOT NULL THEN %s
+                WHEN m.user_id IS NOT NULL THEN %s
+                ELSE NULL
+            END AS role
+        FROM user u
+        LEFT JOIN studentuser s ON s.user_id = u.user_id
+        LEFT JOIN moderatoradmin m ON m.user_id = u.user_id
+        WHERE u.user_id = %s
+        """,
+        (ACCOUNT_ROLE_STUDENT, ACCOUNT_ROLE_MODERATOR, user_id),
+    )
+
+
+def fetch_account_by_credentials(email: str, password: str):
+    return fetch_one(
+        """
+        SELECT
+            u.user_id,
+            u.email,
+            u.display_name,
+            CASE
+                WHEN s.user_id IS NOT NULL THEN %s
+                WHEN m.user_id IS NOT NULL THEN %s
+                ELSE NULL
+            END AS role
+        FROM user u
+        LEFT JOIN studentuser s ON s.user_id = u.user_id
+        LEFT JOIN moderatoradmin m ON m.user_id = u.user_id
+        WHERE u.email = %s AND u.password_hash = %s
+        """,
+        (ACCOUNT_ROLE_STUDENT, ACCOUNT_ROLE_MODERATOR, email, password),
+    )
+
+
+def ensure_cascade_constraints():
+    constraints = [
+        ("studentuser", "fk_studentuser_user", "user_id", "user", "user_id"),
+        ("moderatoradmin", "fk_moderatoradmin_user", "user_id", "user", "user_id"),
+        ("plans", "fk_plans_studentuser", "studentuser_id", "studentuser", "user_id"),
+        ("review", "fk_review_studentuser", "studentuser_id", "studentuser", "user_id"),
+        ("moderate", "fk_moderate_admin", "moderator_id", "moderatoradmin", "user_id"),
+        ("moderate", "fk_moderate_review", "review_id", "review", "review_id"),
+        ("ratingscore", "fk_ratingscore_review", "review_id", "review", "review_id"),
+        ("tagged_with", "fk_tagged_review", "review_id", "review", "review_id"),
+    ]
+
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        for table_name, constraint_name, column_name, ref_table, ref_column in constraints:
+            cursor.execute(
+                """
+                SELECT UPDATE_RULE, DELETE_RULE
+                FROM information_schema.REFERENTIAL_CONSTRAINTS
+                WHERE CONSTRAINT_SCHEMA = DATABASE()
+                  AND TABLE_NAME = %s
+                  AND CONSTRAINT_NAME = %s
+                """,
+                (table_name, constraint_name),
+            )
+            current = cursor.fetchone()
+            if not current:
+                continue
+
+            if (
+                current["UPDATE_RULE"] == "CASCADE"
+                and current["DELETE_RULE"] == "CASCADE"
+            ):
+                continue
+
+            cursor.execute(
+                f"ALTER TABLE `{table_name}` DROP FOREIGN KEY `{constraint_name}`"
+            )
+            cursor.execute(
+                f"""
+                ALTER TABLE `{table_name}`
+                ADD CONSTRAINT `{constraint_name}`
+                FOREIGN KEY (`{column_name}`) REFERENCES `{ref_table}` (`{ref_column}`)
+                ON DELETE CASCADE
+                ON UPDATE CASCADE
+                """
+            )
+
+        conn.commit()
+    finally:
+        cursor.close()
+        conn.close()
+
+
 # =========================================================
 # Pydantic models
 # =========================================================
 
 class StudentRegister(BaseModel):
-    username: str
+    display_name: str
     email: str
     password: str
 
@@ -148,6 +253,12 @@ class StudentRegister(BaseModel):
 class LoginRequest(BaseModel):
     email: str
     password: str
+
+
+class AccountUpdate(BaseModel):
+    display_name: Optional[str] = None
+    email: Optional[str] = None
+    password: Optional[str] = None
 
 
 class PlanCreate(BaseModel):
@@ -187,28 +298,49 @@ class ModerationUpdate(BaseModel):
 # Auth / users
 # =========================================================
 
-@app.post("/students/register")
-def register_student(payload: StudentRegister):
-    student_id = execute_write(
-        """
-        INSERT INTO studentuser (username, email, password_hash)
-        VALUES (%s, %s, %s)
-        """,
-        (payload.username, payload.email, payload.password),
-    )
-    return {"message": "Student created", "student_id": student_id}
+@app.post("/auth/register")
+def register_account(payload: StudentRegister):
+    existing = fetch_one("SELECT user_id FROM user WHERE email = %s", (payload.email,))
+    if existing:
+        raise HTTPException(status_code=409, detail="Email already registered")
+
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        conn.start_transaction()
+
+        cursor.execute(
+            """
+            INSERT INTO user (email, display_name, password_hash)
+            VALUES (%s, %s, %s)
+            """,
+            (payload.email, payload.display_name, payload.password),
+        )
+        user_id = cursor.lastrowid
+
+        cursor.execute(
+            "INSERT INTO studentuser (user_id) VALUES (%s)",
+            (user_id,),
+        )
+
+        conn.commit()
+    except Exception as exc:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        cursor.close()
+        conn.close()
+
+    return {
+        "message": "Student account created",
+        "user": fetch_account_by_user_id(user_id),
+    }
 
 
-@app.post("/students/login")
-def login_student(payload: LoginRequest):
-    row = fetch_one(
-        """
-        SELECT student_id, username, email
-        FROM studentuser
-        WHERE email = %s AND password_hash = %s
-        """,
-        (payload.email, payload.password),
-    )
+@app.post("/auth/login")
+def login_account(payload: LoginRequest):
+    row = fetch_account_by_credentials(payload.email, payload.password)
 
     if not row:
         raise HTTPException(status_code=401, detail="Invalid credentials")
@@ -216,18 +348,74 @@ def login_student(payload: LoginRequest):
     return {"message": "Login successful", "user": row}
 
 
-@app.post("/moderators/login")
-def login_moderator(payload: LoginRequest):
-    row = fetch_one(
-        """
-        SELECT moderator_id, username, email
-        FROM moderatoradmin
-        WHERE email = %s AND password_hash = %s
-        """,
-        (payload.email, payload.password),
-    )
+@app.get("/users/{user_id}")
+def get_user_account(user_id: int):
+    row = fetch_account_by_user_id(user_id)
 
     if not row:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    return row
+
+
+@app.patch("/users/{user_id}")
+def update_user_account(user_id: int, payload: AccountUpdate):
+    current = fetch_one("SELECT user_id, email FROM user WHERE user_id = %s", (user_id,))
+    if not current:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    if payload.email and payload.email != current["email"]:
+        existing = fetch_one("SELECT user_id FROM user WHERE email = %s", (payload.email,))
+        if existing and existing["user_id"] != user_id:
+            raise HTTPException(status_code=409, detail="Email already registered")
+
+    execute_write(
+        """
+        UPDATE user
+        SET display_name = COALESCE(%s, display_name),
+            email = COALESCE(%s, email),
+            password_hash = COALESCE(%s, password_hash)
+        WHERE user_id = %s
+        """,
+        (payload.display_name, payload.email, payload.password, user_id),
+    )
+
+    return {
+        "message": "Account updated",
+        "user": fetch_account_by_user_id(user_id),
+    }
+
+
+@app.delete("/users/{user_id}")
+def delete_user_account(user_id: int):
+    current = fetch_account_by_user_id(user_id)
+    if not current:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    execute_write("DELETE FROM user WHERE user_id = %s", (user_id,))
+    return {"message": "Account deleted", "user_id": user_id}
+
+
+@app.post("/students/register")
+def register_student(payload: StudentRegister):
+    return register_account(payload)
+
+
+@app.post("/students/login")
+def login_student(payload: LoginRequest):
+    row = fetch_account_by_credentials(payload.email, payload.password)
+
+    if not row or row["role"] != ACCOUNT_ROLE_STUDENT:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    return {"message": "Login successful", "user": row}
+
+
+@app.post("/moderators/login")
+def login_moderator(payload: LoginRequest):
+    row = fetch_account_by_credentials(payload.email, payload.password)
+
+    if not row or row["role"] != ACCOUNT_ROLE_MODERATOR:
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
     return {"message": "Login successful", "user": row}
@@ -395,6 +583,8 @@ def get_professor_reviews(prof_id: int, status: str = "APPROVED"):
         SELECT
             r.review_id,
             r.source,
+            r.studentuser_id AS student_id,
+            u.display_name AS student_username,
             r.prof_id,
             r.external_prof_id,
             r.review_text,
@@ -410,12 +600,14 @@ def get_professor_reviews(prof_id: int, status: str = "APPROVED"):
                 r.prof_id = p.prof_id
                 OR (pem.external_prof_id IS NOT NULL AND r.external_prof_id = pem.external_prof_id)
             )
+        LEFT JOIN studentuser su ON su.user_id = r.studentuser_id
+        LEFT JOIN user u ON u.user_id = su.user_id
         LEFT JOIN ratingscore rs ON rs.review_id = r.review_id
         LEFT JOIN tagged_with tw ON tw.review_id = r.review_id
         LEFT JOIN tag t ON t.tag_id = tw.tag_id
         WHERE p.prof_id = %s AND r.status = %s
         GROUP BY
-            r.review_id, r.source,
+            r.review_id, r.source, r.studentuser_id, u.display_name,
             r.prof_id, r.external_prof_id,
             r.review_text, r.course_code_raw, r.status, r.created_at
         ORDER BY r.created_at DESC
@@ -479,7 +671,7 @@ def get_student_plans(student_id: int):
     return fetch_all(
         """
         SELECT
-            p.student_id,
+            p.studentuser_id AS student_id,
             so.offering_id,
             c.course_number,
             c.course_title,
@@ -492,7 +684,7 @@ def get_student_plans(student_id: int):
         JOIN sectionoffering so ON so.offering_id = p.offering_id
         JOIN course c ON c.course_id = so.course_id
         JOIN professor prof ON prof.prof_id = so.prof_id
-        WHERE p.student_id = %s
+        WHERE p.studentuser_id = %s
         ORDER BY so.year DESC, FIELD(LOWER(so.term), 'spring', 'summer', 'fall'), c.course_number, so.section_no
         """,
         (student_id,),
@@ -502,7 +694,7 @@ def get_student_plans(student_id: int):
 @app.post("/plans")
 def add_plan(payload: PlanCreate):
     execute_write(
-        "INSERT INTO plans (student_id, offering_id) VALUES (%s, %s)",
+        "INSERT INTO plans (studentuser_id, offering_id) VALUES (%s, %s)",
         (payload.student_id, payload.offering_id),
     )
     return {"message": "Plan added"}
@@ -511,7 +703,7 @@ def add_plan(payload: PlanCreate):
 @app.delete("/plans")
 def remove_plan(student_id: int = Query(...), offering_id: int = Query(...)):
     execute_write(
-        "DELETE FROM plans WHERE student_id = %s AND offering_id = %s",
+        "DELETE FROM plans WHERE studentuser_id = %s AND offering_id = %s",
         (student_id, offering_id),
     )
     return {"message": "Plan removed"}
@@ -532,7 +724,7 @@ def create_review(payload: ReviewCreate):
         cursor.execute(
             """
             INSERT INTO review
-            (source, student_id, prof_id, external_prof_id, review_text, course_code_raw, status)
+            (source, studentuser_id, prof_id, external_prof_id, review_text, course_code_raw, status)
             VALUES (%s, %s, %s, %s, %s, %s, %s)
             """,
             (
@@ -607,8 +799,8 @@ def get_reviews_for_moderation(status: str = "PENDING"):
         SELECT
             r.review_id,
             r.source,
-            r.student_id,
-            su.username AS student_username,
+            r.studentuser_id AS student_id,
+            u.display_name AS student_username,
             r.prof_id,
             p.prof_name,
             r.review_text,
@@ -616,7 +808,8 @@ def get_reviews_for_moderation(status: str = "PENDING"):
             r.status,
             r.created_at
         FROM review r
-        LEFT JOIN studentuser su ON su.student_id = r.student_id
+        LEFT JOIN studentuser su ON su.user_id = r.studentuser_id
+        LEFT JOIN user u ON u.user_id = su.user_id
         LEFT JOIN professor p ON p.prof_id = r.prof_id
         WHERE r.status = %s
         ORDER BY r.created_at DESC
@@ -755,7 +948,11 @@ def students_planned_all_sections(course_id: int):
     return fetch_all(
         """
         SELECT s.student_id, s.username, s.email
-        FROM studentuser s
+        FROM (
+            SELECT su.user_id AS student_id, u.display_name AS username, u.email
+            FROM studentuser su
+            JOIN user u ON u.user_id = su.user_id
+        ) s
         WHERE EXISTS (
             SELECT 1
             FROM sectionoffering so
@@ -768,7 +965,7 @@ def students_planned_all_sections(course_id: int):
               AND NOT EXISTS (
                   SELECT 1
                   FROM plans p
-                  WHERE p.student_id = s.student_id
+                  WHERE p.studentuser_id = s.student_id
                     AND p.offering_id = so.offering_id
               )
         )
