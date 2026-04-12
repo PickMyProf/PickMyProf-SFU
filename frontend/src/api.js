@@ -1,5 +1,6 @@
 const API = "http://127.0.0.1:8000";
 
+// shared fetch wrapper - throws a real Error with the backend's message so we can display it
 async function request(path, options = {}) {
   const response = await fetch(`${API}${path}`, {
     headers: {
@@ -27,6 +28,7 @@ export async function fetchCourses(search = "") {
   return request(`/courses?search=${encodeURIComponent(search)}`);
 }
 
+// join query - builds query string from whatever filters are set
 export async function searchOfferings({
   search = "",
   term = "",
@@ -49,20 +51,24 @@ export async function fetchProfessorReviews(profId) {
   return request(`/professors/${profId}/reviews`);
 }
 
+// aggregation query - count/avg/min/max for one prof's reviews
 export async function fetchProfessorStats(profId) {
   return request(`/analytics/professors/${profId}/stats`);
 }
 
+// group by query - avg rating per professor for a specific course
 export async function fetchProfessorAveragesByCourse(courseNumber) {
   return request(
     `/analytics/professor-averages-by-course?course_number=${encodeURIComponent(courseNumber)}`,
   );
 }
 
+// division query - profs who taught this course AND covered all 3 terms in the year
 export async function fetchProfessorsAllTerms(courseNumber, year = 2025) {
   return request(`/analytics/professors/all-terms?course_number=${encodeURIComponent(courseNumber)}&year=${year}`);
 }
 
+// update demo - returns before/after so we can show the status change
 export async function updateReviewStatusDemo(reviewId, status) {
   return request(`/analytics/demo/reviews/${reviewId}/status`, {
     method: "PATCH",
@@ -70,6 +76,7 @@ export async function updateReviewStatusDemo(reviewId, status) {
   });
 }
 
+// cascade delete demo - deletes the user and returns row counts before/after across all child tables
 export async function cascadeDeleteStudentDemo(studentId) {
   return request(`/analytics/demo/students/${studentId}/cascade-delete`, {
     method: "DELETE",

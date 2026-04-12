@@ -36,9 +36,7 @@ DEFAULT_REVIEW_TAGS = (
 )
 
 
-# =========================================================
-# Keep existing routes
-# =========================================================
+# --- general app routes ---
 
 @app.get("/")
 def root():
@@ -101,11 +99,11 @@ def seed_external(background_tasks: BackgroundTasks):
     return {"message": "External scraped-data seed started."}
 
 
-# =========================================================
-# DB helpers
-# =========================================================
+# --- db helper functions ---
+# wrappers so we don't repeat the same try/finally/close pattern in every endpoint
 
 def fetch_all(sql: str, params: tuple = ()):
+    # always returns a list, even if empty
     conn = get_connection()
     cursor = conn.cursor(dictionary=True)
     try:
@@ -134,6 +132,7 @@ def fetch_one(sql: str, params: tuple = ()):
 
 
 def execute_write(sql: str, params: tuple = ()):
+    # rollback on any error so we don't leave partial writes
     conn = get_connection()
     cursor = conn.cursor(dictionary=True)
     try:
@@ -164,6 +163,7 @@ def verify_password(password: str, stored_password: str) -> bool:
         return False
 
     parts = stored_password.split("$")
+    # fallback for any old plaintext passwords still in the db
     if len(parts) != 4 or parts[0] != PASSWORD_HASH_ALGORITHM:
         return hmac.compare_digest(stored_password, password)
 
@@ -232,16 +232,20 @@ def fetch_account_by_credentials(email: str, password: str):
     if not row or not verify_password(password, row["password_hash"]):
         return None
 
+    # lazily upgrade any plaintext passwords on successful login
     if not is_password_hashed(row["password_hash"]):
         execute_write(
             "UPDATE user SET password_hash = %s WHERE user_id = %s",
             (hash_password(password), row["user_id"]),
         )
 
+    # don't send the hash back to the client
     row.pop("password_hash", None)
     return row
 
 def ensure_cascade_constraints():
+    # check every FK we care about and upgrade it to ON DELETE CASCADE if it isn't already
+    # this runs at startup so we don't have to manually fix the db every time
     constraints = [
         ("studentuser", "fk_studentuser_user", "user_id", "user", "user_id"),
         ("moderatoradmin", "fk_moderatoradmin_user", "user_id", "user", "user_id"),
@@ -298,6 +302,8 @@ def ensure_cascade_constraints():
 
 
 def ensure_saved_tables():
+    # creates any tables that don't exist in the schema yet and patches the review table
+    # easier than writing a migration script for a class project
     conn = get_connection()
     cursor = conn.cursor(dictionary=True)
 
@@ -338,6 +344,7 @@ def ensure_saved_tables():
             )
             """
         )
+        # add is_anonymous column if it's missing (added this feature mid-project)
         cursor.execute("SHOW COLUMNS FROM review LIKE 'is_anonymous'")
         if not cursor.fetchone():
             cursor.execute(
@@ -361,9 +368,7 @@ def ensure_saved_tables():
         conn.close()
 
 
-# =========================================================
-# Pydantic models
-# =========================================================
+# --- request body models ---
 
 class StudentRegister(BaseModel):
     display_name: str
@@ -416,9 +421,7 @@ class ReviewStatusUpdate(BaseModel):
     status: str
 
 
-# =========================================================
-# Auth / users
-# =========================================================
+# --- auth + account management ---
 
 @app.post("/auth/register")
 def register_account(payload: StudentRegister):
@@ -510,9 +513,7 @@ def delete_user_account(user_id: int):
     return {"message": "Account deleted", "user_id": user_id}
 
 
-# =========================================================
-# Courses / offerings / professors
-# =========================================================
+# --- courses, offerings, professors ---
 
 @app.get("/courses")
 def get_courses(search: str = ""):
@@ -527,10 +528,8 @@ def get_courses(search: str = ""):
     )
 
 
-# ---------------------------------------------------------
-# JOIN QUERY demo
-# Search offerings with joined course/professor/review/tag data
-# ---------------------------------------------------------
+# join query for the rubric
+# pulls course/prof/section/review/rating/tag data all in one query across ~9 tables
 @app.get("/offerings/search")
 def search_offerings(
     search: str = "",
@@ -671,9 +670,7 @@ def get_tags():
     return fetch_all("SELECT tag_id, tag_name FROM tag ORDER BY tag_name")
 
 
-# =========================================================
-# Saved courses / instructors
-# =========================================================
+# --- saved courses and instructors (basically a bookmark/watchlist feature) ---
 
 @app.get("/students/{student_id}/saved")
 def get_student_saved_items(student_id: int):
@@ -1017,9 +1014,7 @@ def delete_student_review(student_id: int, review_id: int):
     return {"message": "Review deleted", "review_id": review_id}
 
 
-# =========================================================
-# Moderation / update demo
-# =========================================================
+# --- moderation endpoints + update demo ---
 
 @app.get("/moderation/reviews")
 def get_reviews_for_moderation(status: str = "PENDING"):
@@ -1151,9 +1146,8 @@ def moderate_review(review_id: int, payload: ModerationUpdate):
         conn.close()
 
 
-# ---------------------------------------------------------
-# UPDATE operation demo
-# ---------------------------------------------------------
+# update demo for the rubric
+# snapshots the row before and after so we can actually show the change happened
 @app.patch("/analytics/demo/reviews/{review_id}/status")
 def update_review_status_demo(review_id: int, payload: ReviewStatusUpdate):
     next_status = payload.status.upper().strip()
@@ -1192,13 +1186,10 @@ def update_review_status_demo(review_id: int, payload: ReviewStatusUpdate):
     }
 
 
-# =========================================================
-# Analytics / rubric query demos
-# =========================================================
+# --- analytics + rubric query demos ---
 
-# ---------------------------------------------------------
-# AGGREGATION query demo
-# ---------------------------------------------------------
+# aggregation query for the rubric
+# COUNT, AVG, MIN, MAX across all approved reviews for one professor
 @app.get("/analytics/professors/{prof_id}/stats")
 def professor_stats(prof_id: int):
     row = fetch_one(
@@ -1233,9 +1224,9 @@ def professor_stats(prof_id: int):
     return row
 
 
-# ---------------------------------------------------------
-# AGGREGATION WITH GROUP BY demo
-# ---------------------------------------------------------
+# aggregation + group by for the rubric
+# same idea as professor_stats but grouped by professor so you can compare
+# everyone who's taught the same course
 @app.get("/analytics/professor-averages-by-course")
 def professor_averages_by_course(course_number: str):
     return fetch_all(
@@ -1269,11 +1260,9 @@ def professor_averages_by_course(course_number: str):
     )
 
 
-# ---------------------------------------------------------
-# DIVISION query demo
-# Professors who taught in ALL three main terms (Spring, Summer, Fall)
-# in a given year — classic relational division.
-# ---------------------------------------------------------
+# division query for the rubric
+# finds profs (who teach the searched course) that covered spring, summer AND fall in a given year
+# double NOT EXISTS is the standard way to do relational division in SQL
 @app.get("/analytics/professors/all-terms")
 def professors_all_terms(course_number: str, year: int = 2025):
     return fetch_all(
@@ -1349,10 +1338,9 @@ def get_student_dependent_counts(student_id: int):
     )
 
 
-# ---------------------------------------------------------
-# DELETE operation with CASCADE demo
-# Deletes a user row and shows cascading deletes in child tables.
-# ---------------------------------------------------------
+# cascade delete demo for the rubric
+# deletes the user row and FK cascades handle the rest
+# we count rows before and after in all child tables to prove it actually worked
 @app.delete("/analytics/demo/students/{student_id}/cascade-delete")
 def cascade_delete_student_demo(student_id: int):
     student = fetch_one(
