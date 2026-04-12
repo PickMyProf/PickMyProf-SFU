@@ -11,7 +11,6 @@ import {
   fetchProfessorStats,
   fetchSavedItems,
   fetchStudentReviews,
-  fetchTags,
   fetchModerationHistory,
   loginAccount,
   moderateReview,
@@ -52,17 +51,6 @@ function storeReviewStatuses(userId, reviews) {
     getReviewStatusStorageKey(userId),
     JSON.stringify(statuses),
   );
-}
-
-function parseTagIds(tagIds) {
-  if (!tagIds) {
-    return [];
-  }
-
-  return String(tagIds)
-    .split(",")
-    .map((tagId) => Number(tagId))
-    .filter(Boolean);
 }
 
 function readStoredUser() {
@@ -124,7 +112,6 @@ function App() {
     review_text: "",
     overall_score: 4,
     is_anonymous: false,
-    tag_ids: [],
   });
   const [reviewSubmitting, setReviewSubmitting] = useState(false);
   const [reviewError, setReviewError] = useState("");
@@ -136,7 +123,6 @@ function App() {
   const [editingReviewId, setEditingReviewId] = useState(null);
   const [myReviewsModalOpen, setMyReviewsModalOpen] = useState(false);
   const [notificationsModalOpen, setNotificationsModalOpen] = useState(false);
-  const [availableTags, setAvailableTags] = useState([]);
 
   const [pendingReviewCount, setPendingReviewCount] = useState(0);
   const [moderationModalOpen, setModerationModalOpen] = useState(false);
@@ -207,15 +193,6 @@ function App() {
     const timeout = setTimeout(() => setReviewNotice(null), 5000);
     return () => clearTimeout(timeout);
   }, [reviewNotice]);
-
-  const loadTags = useCallback(async () => {
-    try {
-      const data = await fetchTags();
-      setAvailableTags(data);
-    } catch {
-      setAvailableTags([]);
-    }
-  }, []);
 
   const loadSavedItems = useCallback(async () => {
     if (!isStudent || !currentUser?.user_id) {
@@ -294,8 +271,7 @@ function App() {
     loadSavedItems();
     loadStudentReviews();
     loadPendingReviewCount();
-    loadTags();
-  }, [loadPendingReviewCount, loadSavedItems, loadStudentReviews, loadTags]);
+  }, [loadPendingReviewCount, loadSavedItems, loadStudentReviews]);
 
   const loadCourses = useCallback(async () => {
     if (!searchTerm.trim()) {
@@ -445,7 +421,6 @@ function App() {
       review_text: "",
       overall_score: 4,
       is_anonymous: false,
-      tag_ids: [],
     });
     setReviewSubmitting(false);
     setReviewError("");
@@ -650,7 +625,6 @@ function App() {
       review_text: "",
       overall_score: 4,
       is_anonymous: false,
-      tag_ids: [],
     });
     setReviewError("");
     setReviewMessage("");
@@ -671,23 +645,10 @@ function App() {
       review_text: review.review_text || "",
       overall_score: Number(review.overall_rating ?? 4),
       is_anonymous: Boolean(review.is_anonymous),
-      tag_ids: parseTagIds(review.tag_ids),
     });
     setReviewError("");
     setReviewMessage("");
     setReviewModalOpen(true);
-  };
-
-  const toggleReviewTag = (tagId) => {
-    setReviewForm((current) => {
-      const hasTag = current.tag_ids.includes(tagId);
-      return {
-        ...current,
-        tag_ids: hasTag
-          ? current.tag_ids.filter((currentTagId) => currentTagId !== tagId)
-          : [...current.tag_ids, tagId],
-      };
-    });
   };
 
   const handleReviewSubmit = async (event) => {
@@ -707,7 +668,6 @@ function App() {
         review_text: reviewForm.review_text,
         overall_score: reviewForm.overall_score,
         is_anonymous: reviewForm.is_anonymous,
-        tag_ids: reviewForm.tag_ids,
       };
 
       if (reviewMode === "edit" && editingReviewId) {
@@ -715,7 +675,6 @@ function App() {
           review_text: payload.review_text,
           overall_score: payload.overall_score,
           is_anonymous: payload.is_anonymous,
-          tag_ids: payload.tag_ids,
         });
         setReviewMessage("Pending review updated.");
       } else {
@@ -727,7 +686,6 @@ function App() {
         review_text: "",
         overall_score: 4,
         is_anonymous: false,
-        tag_ids: [],
       });
       setReviewMode("create");
       setEditingReviewId(null);
@@ -1352,15 +1310,6 @@ function App() {
                             <p className="review-visibility">
                               Posted as {review.is_anonymous ? "Anonymous" : "your name"}
                             </p>
-                            {review.tags && (
-                              <div className="review-tags">
-                                {review.tags.split(", ").map((tag) => (
-                                  <span key={tag} className="tag-chip">
-                                    {tag}
-                                  </span>
-                                ))}
-                              </div>
-                            )}
                             <div className="review-card-actions">
                               {review.status === "PENDING" && (
                                 <button
@@ -1406,15 +1355,6 @@ function App() {
                           </span>
                         </div>
                         <p className="review-body">{review.review_text}</p>
-                        {review.tags && (
-                          <div className="review-tags">
-                            {review.tags.split(", ").map((tag) => (
-                              <span key={tag} className="tag-chip">
-                                {tag}
-                              </span>
-                            ))}
-                          </div>
-                        )}
                       </div>
                     ))
                   )}
@@ -1504,28 +1444,6 @@ function App() {
                   </small>
                 </span>
               </label>
-              <div className="review-tag-picker">
-                <div className="review-tag-picker-head">
-                  <span>Quick Tags</span>
-                  <small>Optional</small>
-                </div>
-                <div className="review-tag-options">
-                  {availableTags.map((tag) => (
-                    <button
-                      type="button"
-                      key={tag.tag_id}
-                      className={
-                        reviewForm.tag_ids.includes(tag.tag_id)
-                          ? "tag-option active"
-                          : "tag-option"
-                      }
-                      onClick={() => toggleReviewTag(tag.tag_id)}
-                    >
-                      {tag.tag_name}
-                    </button>
-                  ))}
-                </div>
-              </div>
               {reviewError && <p className="form-error">{reviewError}</p>}
               <div className="modal-actions">
                 <button
@@ -1603,15 +1521,6 @@ function App() {
                           : ""}
                       </span>
                     </div>
-                    {review.tags && (
-                      <div className="review-tags">
-                        {review.tags.split(", ").map((tag) => (
-                          <span key={tag} className="tag-chip">
-                            {tag}
-                          </span>
-                        ))}
-                      </div>
-                    )}
                     <div className="review-card-actions">
                       {review.status === "PENDING" && (
                         <button

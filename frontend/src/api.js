@@ -53,10 +53,6 @@ export async function fetchProfessorStats(profId) {
   return request(`/analytics/professors/${profId}/stats`);
 }
 
-export async function fetchTags() {
-  return request("/tags");
-}
-
 export async function loginAccount(payload) {
   return request("/auth/login", {
     method: "POST",

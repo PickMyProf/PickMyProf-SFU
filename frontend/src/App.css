@@ -884,55 +884,6 @@
   line-height: 1.35;
 }
 
-.review-tag-picker {
-  padding: 12px;
-  border: 1px solid #f1d4da;
-  border-radius: 12px;
-  background: #ffffff;
-}
-
-.review-tag-picker-head {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 10px;
-}
-
-.review-tag-picker-head span {
-  color: #374151;
-  font-size: 0.88rem;
-  font-weight: 800;
-}
-
-.review-tag-picker-head small {
-  color: #9ca3af;
-  font-weight: 700;
-}
-
-.review-tag-options {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 7px;
-}
-
-.tag-option {
-  border: 1px solid #e5e7eb;
-  background: #fafbfc;
-  color: #374151;
-  border-radius: 999px;
-  padding: 6px 10px;
-  font: inherit;
-  font-size: 0.78rem;
-  font-weight: 800;
-  cursor: pointer;
-}
-
-.tag-option.active {
-  border-color: #a6192e;
-  background: #fde7ec;
-  color: #a6192e;
-}
-
 .review-composer.locked {
   background: #ffffff;
   border-color: #e5e7eb;
@@ -1094,23 +1045,6 @@
 
 .inline-remove {
   margin-top: 10px;
-}
-
-.review-tags {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 5px;
-  margin-top: 8px;
-}
-
-.tag-chip {
-  display: inline-block;
-  background: #fde7ec;
-  color: #a6192e;
-  padding: 2px 9px;
-  border-radius: 999px;
-  font-size: 0.74rem;
-  font-weight: 500;
 }
 
 .modal-backdrop {
