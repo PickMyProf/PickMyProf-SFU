@@ -478,8 +478,8 @@ function App() {
     setLoadingOfferings(false);
     setCourseProfessorAverages([]);
     setLoadingCourseProfessorAverages(false);
-    setPlannedAllStudents([]);
-    setLoadingPlannedAllStudents(false);
+    setAllTermsProfessors([]);
+    setLoadingAllTermsProfessors(false);
     setCourseQueryError("");
     setSelectedProf(null);
     setProfStats(null);
