@@ -1,3 +1,6 @@
+import hashlib
+import hmac
+import secrets
 from typing import List, Optional
 
 from fastapi import FastAPI, BackgroundTasks, HTTPException, Query
@@ -21,6 +24,16 @@ _external_seed_running = False
 OVERALL_CRITERION_ID = 1
 ACCOUNT_ROLE_STUDENT = "STUDENT"
 ACCOUNT_ROLE_MODERATOR = "MODERATOR"
+PASSWORD_HASH_ALGORITHM = "pbkdf2_sha256"
+PASSWORD_HASH_ITERATIONS = 260000
+DEFAULT_REVIEW_TAGS = (
+    "organized",
+    "exam-heavy",
+    "clear",
+    "fast-paced",
+    "hard marker",
+    "helpful office hours",
+)
 
 
 # =========================================================
@@ -34,6 +47,7 @@ def root():
 
 @app.on_event("startup")
 def startup_tasks():
+    ensure_saved_tables()
     ensure_cascade_constraints()
 
 
@@ -142,6 +156,45 @@ def execute_write(sql: str, params: tuple = ()):
         conn.close()
 
 
+def hash_password(password: str) -> str:
+    salt = secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        salt.encode("utf-8"),
+        PASSWORD_HASH_ITERATIONS,
+    ).hex()
+    return f"{PASSWORD_HASH_ALGORITHM}${PASSWORD_HASH_ITERATIONS}${salt}${digest}"
+
+
+def verify_password(password: str, stored_password: str) -> bool:
+    if not stored_password:
+        return False
+
+    parts = stored_password.split("$")
+    if len(parts) != 4 or parts[0] != PASSWORD_HASH_ALGORITHM:
+        return hmac.compare_digest(stored_password, password)
+
+    try:
+        iterations = int(parts[1])
+        salt = parts[2]
+        expected_digest = parts[3]
+    except (TypeError, ValueError):
+        return False
+
+    actual_digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        salt.encode("utf-8"),
+        iterations,
+    ).hex()
+    return hmac.compare_digest(actual_digest, expected_digest)
+
+
+def is_password_hashed(stored_password: str) -> bool:
+    return bool(stored_password and stored_password.startswith(f"{PASSWORD_HASH_ALGORITHM}$"))
+
+
 def fetch_account_by_user_id(user_id: int):
     return fetch_one(
         """
@@ -164,12 +217,13 @@ def fetch_account_by_user_id(user_id: int):
 
 
 def fetch_account_by_credentials(email: str, password: str):
-    return fetch_one(
+    row = fetch_one(
         """
         SELECT
             u.user_id,
             u.email,
             u.display_name,
+            u.password_hash,
             CASE
                 WHEN s.user_id IS NOT NULL THEN %s
                 WHEN m.user_id IS NOT NULL THEN %s
@@ -178,11 +232,22 @@ def fetch_account_by_credentials(email: str, password: str):
         FROM user u
         LEFT JOIN studentuser s ON s.user_id = u.user_id
         LEFT JOIN moderatoradmin m ON m.user_id = u.user_id
-        WHERE u.email = %s AND u.password_hash = %s
+        WHERE u.email = %s
         """,
-        (ACCOUNT_ROLE_STUDENT, ACCOUNT_ROLE_MODERATOR, email, password),
+        (ACCOUNT_ROLE_STUDENT, ACCOUNT_ROLE_MODERATOR, email),
     )
 
+    if not row or not verify_password(password, row["password_hash"]):
+        return None
+
+    if not is_password_hashed(row["password_hash"]):
+        execute_write(
+            "UPDATE user SET password_hash = %s WHERE user_id = %s",
+            (hash_password(password), row["user_id"]),
+        )
+
+    row.pop("password_hash", None)
+    return row
 
 def ensure_cascade_constraints():
     constraints = [
@@ -240,6 +305,70 @@ def ensure_cascade_constraints():
         conn.close()
 
 
+def ensure_saved_tables():
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS saved_courses (
+                studentuser_id INT NOT NULL,
+                course_id INT NOT NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (studentuser_id, course_id),
+                CONSTRAINT fk_saved_courses_studentuser
+                    FOREIGN KEY (studentuser_id) REFERENCES studentuser(user_id)
+                    ON DELETE CASCADE ON UPDATE CASCADE,
+                CONSTRAINT fk_saved_courses_course
+                    FOREIGN KEY (course_id) REFERENCES course(course_id)
+                    ON DELETE CASCADE ON UPDATE CASCADE
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS saved_instructors (
+                studentuser_id INT NOT NULL,
+                course_id INT NOT NULL,
+                prof_id INT NOT NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (studentuser_id, course_id, prof_id),
+                CONSTRAINT fk_saved_instructors_studentuser
+                    FOREIGN KEY (studentuser_id) REFERENCES studentuser(user_id)
+                    ON DELETE CASCADE ON UPDATE CASCADE,
+                CONSTRAINT fk_saved_instructors_course
+                    FOREIGN KEY (course_id) REFERENCES course(course_id)
+                    ON DELETE CASCADE ON UPDATE CASCADE,
+                CONSTRAINT fk_saved_instructors_professor
+                    FOREIGN KEY (prof_id) REFERENCES professor(prof_id)
+                    ON DELETE CASCADE ON UPDATE CASCADE
+            )
+            """
+        )
+        cursor.execute("SHOW COLUMNS FROM review LIKE 'is_anonymous'")
+        if not cursor.fetchone():
+            cursor.execute(
+                """
+                ALTER TABLE review
+                ADD COLUMN is_anonymous TINYINT(1) NOT NULL DEFAULT 0
+                AFTER status
+                """
+            )
+        for tag_name in DEFAULT_REVIEW_TAGS:
+            cursor.execute(
+                "INSERT IGNORE INTO tag (tag_name) VALUES (%s)",
+                (tag_name,),
+            )
+        conn.commit()
+    except Exception as exc:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        cursor.close()
+        conn.close()
+
+
 # =========================================================
 # Pydantic models
 # =========================================================
@@ -279,6 +408,7 @@ class ReviewCreate(BaseModel):
     course_code_raw: Optional[str] = None
     source: str = "APP"
     status: str = "PENDING"
+    is_anonymous: bool = False
     scores: List[ReviewScoreIn]
     tag_ids: List[int] = []
 
@@ -292,6 +422,31 @@ class ReviewUpdate(BaseModel):
 class ModerationUpdate(BaseModel):
     moderator_id: int
     action_taken: str
+
+
+class SavedCourseCreate(BaseModel):
+    course_id: int
+
+
+class SavedInstructorCreate(BaseModel):
+    course_id: int
+    prof_id: int
+
+
+class StudentReviewCreate(BaseModel):
+    prof_id: int
+    review_text: str
+    overall_score: float = Field(..., ge=0, le=5)
+    course_code_raw: Optional[str] = None
+    is_anonymous: bool = False
+    tag_ids: List[int] = []
+
+
+class StudentReviewUpdate(BaseModel):
+    review_text: Optional[str] = None
+    overall_score: Optional[float] = Field(default=None, ge=0, le=5)
+    is_anonymous: Optional[bool] = None
+    tag_ids: Optional[List[int]] = None
 
 
 # =========================================================
@@ -315,7 +470,7 @@ def register_account(payload: StudentRegister):
             INSERT INTO user (email, display_name, password_hash)
             VALUES (%s, %s, %s)
             """,
-            (payload.email, payload.display_name, payload.password),
+            (payload.email, payload.display_name, hash_password(payload.password)),
         )
         user_id = cursor.lastrowid
 
@@ -369,6 +524,8 @@ def update_user_account(user_id: int, payload: AccountUpdate):
         if existing and existing["user_id"] != user_id:
             raise HTTPException(status_code=409, detail="Email already registered")
 
+    next_password_hash = hash_password(payload.password) if payload.password else None
+
     execute_write(
         """
         UPDATE user
@@ -377,7 +534,7 @@ def update_user_account(user_id: int, payload: AccountUpdate):
             password_hash = COALESCE(%s, password_hash)
         WHERE user_id = %s
         """,
-        (payload.display_name, payload.email, payload.password, user_id),
+        (payload.display_name, payload.email, next_password_hash, user_id),
     )
 
     return {
@@ -584,12 +741,13 @@ def get_professor_reviews(prof_id: int, status: str = "APPROVED"):
             r.review_id,
             r.source,
             r.studentuser_id AS student_id,
-            u.display_name AS student_username,
+            CASE WHEN r.is_anonymous = 1 THEN 'Anonymous' ELSE u.display_name END AS student_username,
             r.prof_id,
             r.external_prof_id,
             r.review_text,
             r.course_code_raw,
             r.status,
+            r.is_anonymous,
             r.created_at,
             ROUND(AVG(CASE WHEN rs.criterion_id = %s THEN rs.score END), 2) AS overall_rating,
             GROUP_CONCAT(DISTINCT t.tag_name ORDER BY t.tag_name SEPARATOR ', ') AS tags
@@ -609,7 +767,7 @@ def get_professor_reviews(prof_id: int, status: str = "APPROVED"):
         GROUP BY
             r.review_id, r.source, r.studentuser_id, u.display_name,
             r.prof_id, r.external_prof_id,
-            r.review_text, r.course_code_raw, r.status, r.created_at
+            r.review_text, r.course_code_raw, r.status, r.is_anonymous, r.created_at
         ORDER BY r.created_at DESC
         """,
         (OVERALL_CRITERION_ID, prof_id, status.upper()),
@@ -622,7 +780,7 @@ def get_review_details(review_id: int):
         """
         SELECT
             review_id, source, prof_id, external_prof_id,
-            review_text, course_code_raw, status, created_at
+            review_text, course_code_raw, status, is_anonymous, created_at
         FROM review
         WHERE review_id = %s
         """,
@@ -710,8 +868,331 @@ def remove_plan(student_id: int = Query(...), offering_id: int = Query(...)):
 
 
 # =========================================================
+# Saved courses / instructors
+# =========================================================
+
+@app.get("/students/{student_id}/saved")
+def get_student_saved_items(student_id: int):
+    student = fetch_one("SELECT user_id FROM studentuser WHERE user_id = %s", (student_id,))
+    if not student:
+        raise HTTPException(status_code=404, detail="Student not found")
+
+    saved_courses = fetch_all(
+        """
+        SELECT
+            sc.studentuser_id AS student_id,
+            sc.course_id,
+            c.course_number,
+            c.course_title,
+            sc.created_at
+        FROM saved_courses sc
+        JOIN course c ON c.course_id = sc.course_id
+        WHERE sc.studentuser_id = %s
+        ORDER BY sc.created_at DESC, CAST(c.course_number AS UNSIGNED), c.course_number
+        """,
+        (student_id,),
+    )
+
+    saved_instructors = fetch_all(
+        """
+        SELECT
+            si.studentuser_id AS student_id,
+            si.course_id,
+            c.course_number,
+            c.course_title,
+            si.prof_id,
+            p.prof_name,
+            si.created_at
+        FROM saved_instructors si
+        JOIN course c ON c.course_id = si.course_id
+        JOIN professor p ON p.prof_id = si.prof_id
+        WHERE si.studentuser_id = %s
+        ORDER BY si.created_at DESC, p.prof_name, CAST(c.course_number AS UNSIGNED), c.course_number
+        """,
+        (student_id,),
+    )
+
+    return {"courses": saved_courses, "instructors": saved_instructors}
+
+
+@app.post("/students/{student_id}/saved/courses")
+def save_course(student_id: int, payload: SavedCourseCreate):
+    student = fetch_one("SELECT user_id FROM studentuser WHERE user_id = %s", (student_id,))
+    if not student:
+        raise HTTPException(status_code=404, detail="Student not found")
+
+    course = fetch_one("SELECT course_id FROM course WHERE course_id = %s", (payload.course_id,))
+    if not course:
+        raise HTTPException(status_code=404, detail="Course not found")
+
+    execute_write(
+        """
+        INSERT IGNORE INTO saved_courses (studentuser_id, course_id)
+        VALUES (%s, %s)
+        """,
+        (student_id, payload.course_id),
+    )
+
+    return {"message": "Course saved", "saved": get_student_saved_items(student_id)}
+
+
+@app.delete("/students/{student_id}/saved/courses/{course_id}")
+def remove_saved_course(student_id: int, course_id: int):
+    execute_write(
+        "DELETE FROM saved_courses WHERE studentuser_id = %s AND course_id = %s",
+        (student_id, course_id),
+    )
+
+    return {"message": "Saved course removed", "saved": get_student_saved_items(student_id)}
+
+
+@app.post("/students/{student_id}/saved/instructors")
+def save_instructor(student_id: int, payload: SavedInstructorCreate):
+    student = fetch_one("SELECT user_id FROM studentuser WHERE user_id = %s", (student_id,))
+    if not student:
+        raise HTTPException(status_code=404, detail="Student not found")
+
+    teaching_match = fetch_one(
+        """
+        SELECT offering_id
+        FROM sectionoffering
+        WHERE course_id = %s AND prof_id = %s
+        LIMIT 1
+        """,
+        (payload.course_id, payload.prof_id),
+    )
+
+    if not teaching_match:
+        raise HTTPException(
+            status_code=400,
+            detail="This instructor is not linked to that course offering",
+        )
+
+    execute_write(
+        """
+        INSERT IGNORE INTO saved_instructors (studentuser_id, course_id, prof_id)
+        VALUES (%s, %s, %s)
+        """,
+        (student_id, payload.course_id, payload.prof_id),
+    )
+
+    return {"message": "Instructor saved", "saved": get_student_saved_items(student_id)}
+
+
+@app.delete("/students/{student_id}/saved/instructors/{course_id}/{prof_id}")
+def remove_saved_instructor(student_id: int, course_id: int, prof_id: int):
+    execute_write(
+        """
+        DELETE FROM saved_instructors
+        WHERE studentuser_id = %s AND course_id = %s AND prof_id = %s
+        """,
+        (student_id, course_id, prof_id),
+    )
+
+    return {"message": "Saved instructor removed", "saved": get_student_saved_items(student_id)}
+
+
+# =========================================================
 # Reviews
 # =========================================================
+
+@app.get("/students/{student_id}/reviews")
+def get_student_reviews(student_id: int):
+    student = fetch_one("SELECT user_id FROM studentuser WHERE user_id = %s", (student_id,))
+    if not student:
+        raise HTTPException(status_code=404, detail="Student not found")
+
+    return fetch_all(
+        """
+        SELECT
+            r.review_id,
+            r.studentuser_id AS student_id,
+            r.prof_id,
+            p.prof_name,
+            r.external_prof_id,
+            r.review_text,
+            r.course_code_raw,
+            r.status,
+            r.is_anonymous,
+            r.created_at,
+            ROUND(AVG(CASE WHEN rs.criterion_id = %s THEN rs.score END), 2) AS overall_rating,
+            GROUP_CONCAT(DISTINCT t.tag_id ORDER BY t.tag_name SEPARATOR ',') AS tag_ids,
+            GROUP_CONCAT(DISTINCT t.tag_name ORDER BY t.tag_name SEPARATOR ', ') AS tags
+        FROM review r
+        LEFT JOIN professor p ON p.prof_id = r.prof_id
+        LEFT JOIN ratingscore rs ON rs.review_id = r.review_id
+        LEFT JOIN tagged_with tw ON tw.review_id = r.review_id
+        LEFT JOIN tag t ON t.tag_id = tw.tag_id
+        WHERE r.studentuser_id = %s
+        GROUP BY
+            r.review_id, r.studentuser_id, r.prof_id, p.prof_name,
+            r.external_prof_id, r.review_text, r.course_code_raw,
+            r.status, r.is_anonymous, r.created_at
+        ORDER BY r.created_at DESC
+        """,
+        (OVERALL_CRITERION_ID, student_id),
+    )
+
+
+@app.post("/students/{student_id}/reviews")
+def submit_student_review(student_id: int, payload: StudentReviewCreate):
+    student = fetch_one("SELECT user_id FROM studentuser WHERE user_id = %s", (student_id,))
+    if not student:
+        raise HTTPException(status_code=404, detail="Student not found")
+
+    professor = fetch_one("SELECT prof_id FROM professor WHERE prof_id = %s", (payload.prof_id,))
+    if not professor:
+        raise HTTPException(status_code=404, detail="Professor not found")
+
+    if not payload.review_text.strip():
+        raise HTTPException(status_code=400, detail="Review text is required")
+
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        conn.start_transaction()
+
+        cursor.execute(
+            """
+            INSERT INTO review
+            (source, studentuser_id, prof_id, review_text, course_code_raw, status, is_anonymous)
+            VALUES ('APP', %s, %s, %s, %s, 'PENDING', %s)
+            """,
+            (
+                student_id,
+                payload.prof_id,
+                payload.review_text.strip(),
+                payload.course_code_raw,
+                payload.is_anonymous,
+            ),
+        )
+        review_id = cursor.lastrowid
+
+        cursor.execute(
+            """
+            INSERT INTO ratingscore (review_id, criterion_id, score)
+            VALUES (%s, %s, %s)
+            """,
+            (review_id, OVERALL_CRITERION_ID, payload.overall_score),
+        )
+
+        for tag_id in payload.tag_ids:
+            cursor.execute(
+                "INSERT IGNORE INTO tagged_with (review_id, tag_id) VALUES (%s, %s)",
+                (review_id, tag_id),
+            )
+
+        conn.commit()
+    except Exception as exc:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        cursor.close()
+        conn.close()
+
+    review = fetch_one(
+        """
+        SELECT
+            r.review_id,
+            r.studentuser_id AS student_id,
+            r.prof_id,
+            p.prof_name,
+            r.review_text,
+            r.course_code_raw,
+            r.status,
+            r.is_anonymous,
+            r.created_at,
+            ROUND(AVG(CASE WHEN rs.criterion_id = %s THEN rs.score END), 2) AS overall_rating,
+            GROUP_CONCAT(DISTINCT t.tag_id ORDER BY t.tag_name SEPARATOR ',') AS tag_ids,
+            GROUP_CONCAT(DISTINCT t.tag_name ORDER BY t.tag_name SEPARATOR ', ') AS tags
+        FROM review r
+        LEFT JOIN professor p ON p.prof_id = r.prof_id
+        LEFT JOIN ratingscore rs ON rs.review_id = r.review_id
+        LEFT JOIN tagged_with tw ON tw.review_id = r.review_id
+        LEFT JOIN tag t ON t.tag_id = tw.tag_id
+        WHERE r.review_id = %s AND r.studentuser_id = %s
+        GROUP BY
+            r.review_id, r.studentuser_id, r.prof_id, p.prof_name,
+            r.review_text, r.course_code_raw, r.status, r.is_anonymous, r.created_at
+        """,
+        (OVERALL_CRITERION_ID, review_id, student_id),
+    )
+
+    return {"message": "Review submitted for approval", "review": review}
+
+
+@app.patch("/students/{student_id}/reviews/{review_id}")
+def update_student_review(student_id: int, review_id: int, payload: StudentReviewUpdate):
+    current = fetch_one(
+        """
+        SELECT review_id, status
+        FROM review
+        WHERE review_id = %s AND studentuser_id = %s
+        """,
+        (review_id, student_id),
+    )
+
+    if not current:
+        raise HTTPException(status_code=404, detail="Review not found for this student")
+
+    if current["status"] != "PENDING":
+        raise HTTPException(
+            status_code=400,
+            detail="Only pending reviews can be edited",
+        )
+
+    if payload.review_text is not None and not payload.review_text.strip():
+        raise HTTPException(status_code=400, detail="Review text is required")
+
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        conn.start_transaction()
+
+        cursor.execute(
+            """
+            UPDATE review
+            SET review_text = COALESCE(%s, review_text),
+                is_anonymous = COALESCE(%s, is_anonymous)
+            WHERE review_id = %s AND studentuser_id = %s
+            """,
+            (
+                payload.review_text.strip() if payload.review_text is not None else None,
+                payload.is_anonymous,
+                review_id,
+                student_id,
+            ),
+        )
+
+        if payload.overall_score is not None:
+            cursor.execute(
+                """
+                INSERT INTO ratingscore (review_id, criterion_id, score)
+                VALUES (%s, %s, %s)
+                ON DUPLICATE KEY UPDATE score = VALUES(score)
+                """,
+                (review_id, OVERALL_CRITERION_ID, payload.overall_score),
+            )
+
+        if payload.tag_ids is not None:
+            cursor.execute("DELETE FROM tagged_with WHERE review_id = %s", (review_id,))
+            for tag_id in payload.tag_ids:
+                cursor.execute(
+                    "INSERT IGNORE INTO tagged_with (review_id, tag_id) VALUES (%s, %s)",
+                    (review_id, tag_id),
+                )
+
+        conn.commit()
+    except Exception as exc:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        cursor.close()
+        conn.close()
+
+    return {"message": "Pending review updated", "review_id": review_id}
 
 @app.post("/reviews")
 def create_review(payload: ReviewCreate):
@@ -724,8 +1205,8 @@ def create_review(payload: ReviewCreate):
         cursor.execute(
             """
             INSERT INTO review
-            (source, studentuser_id, prof_id, external_prof_id, review_text, course_code_raw, status)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            (source, studentuser_id, prof_id, external_prof_id, review_text, course_code_raw, status, is_anonymous)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 payload.source,
@@ -735,6 +1216,7 @@ def create_review(payload: ReviewCreate):
                 payload.review_text,
                 payload.course_code_raw,
                 payload.status.upper(),
+                payload.is_anonymous,
             ),
         )
 
@@ -761,6 +1243,24 @@ def create_review(payload: ReviewCreate):
     finally:
         cursor.close()
         conn.close()
+
+
+@app.delete("/students/{student_id}/reviews/{review_id}")
+def delete_student_review(student_id: int, review_id: int):
+    current = fetch_one(
+        "SELECT review_id FROM review WHERE review_id = %s AND studentuser_id = %s",
+        (review_id, student_id),
+    )
+
+    if not current:
+        raise HTTPException(status_code=404, detail="Review not found for this student")
+
+    execute_write(
+        "DELETE FROM review WHERE review_id = %s AND studentuser_id = %s",
+        (review_id, student_id),
+    )
+
+    return {"message": "Review deleted", "review_id": review_id}
 
 
 @app.patch("/reviews/{review_id}")
@@ -806,23 +1306,94 @@ def get_reviews_for_moderation(status: str = "PENDING"):
             r.review_text,
             r.course_code_raw,
             r.status,
-            r.created_at
+            r.is_anonymous,
+            r.created_at,
+            GROUP_CONCAT(DISTINCT t.tag_name ORDER BY t.tag_name SEPARATOR ', ') AS tags
         FROM review r
         LEFT JOIN studentuser su ON su.user_id = r.studentuser_id
         LEFT JOIN user u ON u.user_id = su.user_id
         LEFT JOIN professor p ON p.prof_id = r.prof_id
+        LEFT JOIN tagged_with tw ON tw.review_id = r.review_id
+        LEFT JOIN tag t ON t.tag_id = tw.tag_id
         WHERE r.status = %s
+        GROUP BY
+            r.review_id, r.source, r.studentuser_id, u.display_name,
+            r.prof_id, p.prof_name, r.review_text, r.course_code_raw,
+            r.status, r.is_anonymous, r.created_at
         ORDER BY r.created_at DESC
         """,
         (status.upper(),),
     )
 
 
+@app.get("/moderation/reviews/pending/count")
+def get_pending_review_count():
+    row = fetch_one(
+        "SELECT COUNT(*) AS pending_count FROM review WHERE status = 'PENDING'",
+        (),
+    )
+    return {"pending_count": row["pending_count"] if row else 0}
+
+
+@app.get("/moderation/history")
+def get_moderation_history(moderator_id: int = Query(...)):
+    moderator = fetch_one(
+        "SELECT user_id FROM moderatoradmin WHERE user_id = %s",
+        (moderator_id,),
+    )
+    if not moderator:
+        raise HTTPException(status_code=403, detail="Moderator account required")
+
+    return fetch_all(
+        """
+        SELECT
+            mo.moderation_id,
+            mo.moderator_id,
+            moderator.display_name AS moderator_name,
+            mo.action_taken,
+            mo.action_time,
+            r.review_id,
+            r.studentuser_id AS student_id,
+            student.display_name AS student_username,
+            r.prof_id,
+            p.prof_name,
+            r.review_text,
+            r.course_code_raw,
+            r.status,
+            r.is_anonymous,
+            r.created_at
+        FROM moderate mo
+        JOIN review r ON r.review_id = mo.review_id
+        LEFT JOIN user moderator ON moderator.user_id = mo.moderator_id
+        LEFT JOIN user student ON student.user_id = r.studentuser_id
+        LEFT JOIN professor p ON p.prof_id = r.prof_id
+        ORDER BY mo.action_time DESC
+        LIMIT 100
+        """,
+        (),
+    )
+
+
 @app.patch("/moderation/reviews/{review_id}")
 def moderate_review(review_id: int, payload: ModerationUpdate):
-    action = payload.action_taken.upper().strip()
-    if action not in {"APPROVED", "HIDDEN", "REMOVED", "PENDING"}:
+    action_aliases = {
+        "ACCEPTED": "APPROVED",
+        "ACCEPT": "APPROVED",
+        "REJECT": "REJECTED",
+    }
+    action = action_aliases.get(
+        payload.action_taken.upper().strip(),
+        payload.action_taken.upper().strip(),
+    )
+    if action not in {"APPROVED", "REJECTED", "HIDDEN", "REMOVED", "PENDING"}:
         raise HTTPException(status_code=400, detail="Invalid action_taken")
+
+    moderator = fetch_one(
+        "SELECT user_id FROM moderatoradmin WHERE user_id = %s",
+        (payload.moderator_id,),
+    )
+    if not moderator:
+        raise HTTPException(status_code=403, detail="Moderator account required")
 
     conn = get_connection()
     cursor = conn.cursor(dictionary=True)

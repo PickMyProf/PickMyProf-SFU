@@ -53,6 +53,10 @@ export async function fetchProfessorStats(profId) {
   return request(`/analytics/professors/${profId}/stats`);
 }
 
+export async function fetchTags() {
+  return request("/tags");
+}
+
 export async function loginAccount(payload) {
   return request("/auth/login", {
     method: "POST",
@@ -77,5 +81,78 @@ export async function updateUserAccount(userId, payload) {
 export async function deleteUserAccount(userId) {
   return request(`/users/${userId}`, {
     method: "DELETE",
+  });
+}
+
+export async function fetchSavedItems(studentId) {
+  return request(`/students/${studentId}/saved`);
+}
+
+export async function saveCourse(studentId, courseId) {
+  return request(`/students/${studentId}/saved/courses`, {
+    method: "POST",
+    body: JSON.stringify({ course_id: courseId }),
+  });
+}
+
+export async function removeSavedCourse(studentId, courseId) {
+  return request(`/students/${studentId}/saved/courses/${courseId}`, {
+    method: "DELETE",
+  });
+}
+
+export async function saveInstructor(studentId, courseId, profId) {
+  return request(`/students/${studentId}/saved/instructors`, {
+    method: "POST",
+    body: JSON.stringify({ course_id: courseId, prof_id: profId }),
+  });
+}
+
+export async function removeSavedInstructor(studentId, courseId, profId) {
+  return request(`/students/${studentId}/saved/instructors/${courseId}/${profId}`, {
+    method: "DELETE",
+  });
+}
+
+export async function fetchStudentReviews(studentId) {
+  return request(`/students/${studentId}/reviews`);
+}
+
+export async function submitStudentReview(studentId, payload) {
+  return request(`/students/${studentId}/reviews`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function updateStudentReview(studentId, reviewId, payload) {
+  return request(`/students/${studentId}/reviews/${reviewId}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function deleteStudentReview(studentId, reviewId) {
+  return request(`/students/${studentId}/reviews/${reviewId}`, {
+    method: "DELETE",
+  });
+}
+
+export async function fetchPendingReviewCount() {
+  return request("/moderation/reviews/pending/count");
+}
+
+export async function fetchPendingReviews() {
+  return request("/moderation/reviews?status=PENDING");
+}
+
+export async function fetchModerationHistory(moderatorId) {
+  return request(`/moderation/history?moderator_id=${moderatorId}`);
+}
+
+export async function moderateReview(reviewId, payload) {
+  return request(`/moderation/reviews/${reviewId}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
   });
 }

@@ -2,17 +2,68 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import "./App.css";
 import PMPLogo from "./assets/PMPLogo.png";
 import {
+  deleteStudentReview,
   deleteUserAccount,
   fetchCourses,
+  fetchPendingReviewCount,
+  fetchPendingReviews,
   fetchProfessorReviews,
   fetchProfessorStats,
+  fetchSavedItems,
+  fetchStudentReviews,
+  fetchTags,
+  fetchModerationHistory,
   loginAccount,
+  moderateReview,
   registerAccount,
+  removeSavedCourse,
+  removeSavedInstructor,
+  saveCourse,
+  saveInstructor,
   searchOfferings,
+  submitStudentReview,
+  updateStudentReview,
   updateUserAccount,
 } from "./api";
 
 const AUTH_STORAGE_KEY = "pickmyprof.currentUser";
+const REVIEW_STATUS_STORAGE_KEY = "pickmyprof.reviewStatuses";
+
+function getReviewStatusStorageKey(userId) {
+  return `${REVIEW_STATUS_STORAGE_KEY}.${userId}`;
+}
+
+function readStoredReviewStatuses(userId) {
+  try {
+    const raw = window.localStorage.getItem(getReviewStatusStorageKey(userId));
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+}
+
+function storeReviewStatuses(userId, reviews) {
+  const statuses = reviews.reduce((accumulator, review) => {
+    accumulator[review.review_id] = review.status;
+    return accumulator;
+  }, {});
+
+  window.localStorage.setItem(
+    getReviewStatusStorageKey(userId),
+    JSON.stringify(statuses),
+  );
+}
+
+function parseTagIds(tagIds) {
+  if (!tagIds) {
+    return [];
+  }
+
+  return String(tagIds)
+    .split(",")
+    .map((tagId) => Number(tagId))
+    .filter(Boolean);
+}
 
 function readStoredUser() {
   try {
@@ -63,8 +114,43 @@ function App() {
   const [profileError, setProfileError] = useState("");
   const [profileMessage, setProfileMessage] = useState("");
 
+  const [savedItems, setSavedItems] = useState({ courses: [], instructors: [] });
+  const [savedLoading, setSavedLoading] = useState(false);
+  const [savedError, setSavedError] = useState("");
+
+  const [studentReviews, setStudentReviews] = useState([]);
+  const [studentReviewsLoading, setStudentReviewsLoading] = useState(false);
+  const [reviewForm, setReviewForm] = useState({
+    review_text: "",
+    overall_score: 4,
+    is_anonymous: false,
+    tag_ids: [],
+  });
+  const [reviewSubmitting, setReviewSubmitting] = useState(false);
+  const [reviewError, setReviewError] = useState("");
+  const [reviewMessage, setReviewMessage] = useState("");
+  const [reviewNotice, setReviewNotice] = useState(null);
+  const [reviewModalOpen, setReviewModalOpen] = useState(false);
+  const [reviewModalCourseCode, setReviewModalCourseCode] = useState("");
+  const [reviewMode, setReviewMode] = useState("create");
+  const [editingReviewId, setEditingReviewId] = useState(null);
+  const [myReviewsModalOpen, setMyReviewsModalOpen] = useState(false);
+  const [notificationsModalOpen, setNotificationsModalOpen] = useState(false);
+  const [availableTags, setAvailableTags] = useState([]);
+
+  const [pendingReviewCount, setPendingReviewCount] = useState(0);
+  const [moderationModalOpen, setModerationModalOpen] = useState(false);
+  const [pendingReviews, setPendingReviews] = useState([]);
+  const [moderationHistoryModalOpen, setModerationHistoryModalOpen] = useState(false);
+  const [moderationHistory, setModerationHistory] = useState([]);
+  const [moderationLoading, setModerationLoading] = useState(false);
+  const [moderationError, setModerationError] = useState("");
+
   const fullText =
     "Welcome to the one place for SFU schedules, professor insights, and account management.";
+
+  const isStudent = currentUser?.role === "STUDENT";
+  const isModerator = currentUser?.role === "MODERATOR";
 
   useEffect(() => {
     let index = 0;
@@ -112,6 +198,104 @@ function App() {
       password: "",
     });
   }, [currentUser]);
+
+  useEffect(() => {
+    if (!reviewNotice) {
+      return undefined;
+    }
+
+    const timeout = setTimeout(() => setReviewNotice(null), 5000);
+    return () => clearTimeout(timeout);
+  }, [reviewNotice]);
+
+  const loadTags = useCallback(async () => {
+    try {
+      const data = await fetchTags();
+      setAvailableTags(data);
+    } catch {
+      setAvailableTags([]);
+    }
+  }, []);
+
+  const loadSavedItems = useCallback(async () => {
+    if (!isStudent || !currentUser?.user_id) {
+      setSavedItems({ courses: [], instructors: [] });
+      setSavedError("");
+      return;
+    }
+
+    setSavedLoading(true);
+    setSavedError("");
+
+    try {
+      const data = await fetchSavedItems(currentUser.user_id);
+      setSavedItems({
+        courses: data.courses || [],
+        instructors: data.instructors || [],
+      });
+    } catch (error) {
+      setSavedError(error.message);
+    } finally {
+      setSavedLoading(false);
+    }
+  }, [currentUser?.user_id, isStudent]);
+
+  const loadStudentReviews = useCallback(async () => {
+    if (!isStudent || !currentUser?.user_id) {
+      setStudentReviews([]);
+      return;
+    }
+
+    setStudentReviewsLoading(true);
+
+    try {
+      const data = await fetchStudentReviews(currentUser.user_id);
+      setStudentReviews(data);
+      const previousStatuses = readStoredReviewStatuses(currentUser.user_id);
+      const changedReview = data.find((review) => {
+        const previousStatus = previousStatuses[review.review_id];
+        return (
+          previousStatus === "PENDING" &&
+          ["APPROVED", "REJECTED"].includes(review.status)
+        );
+      });
+
+      if (changedReview) {
+        setReviewNotice({
+          status: changedReview.status,
+          profName: changedReview.prof_name,
+          courseCode: changedReview.course_code_raw,
+        });
+      }
+
+      storeReviewStatuses(currentUser.user_id, data);
+    } catch {
+      setStudentReviews([]);
+    } finally {
+      setStudentReviewsLoading(false);
+    }
+  }, [currentUser?.user_id, isStudent]);
+
+  const loadPendingReviewCount = useCallback(async () => {
+    if (!isModerator) {
+      setPendingReviewCount(0);
+      return;
+    }
+
+    try {
+      const data = await fetchPendingReviewCount();
+      setPendingReviewCount(data.pending_count || 0);
+    } catch {
+      setPendingReviewCount(0);
+    }
+  }, [isModerator]);
+
+  useEffect(() => {
+    loadSavedItems();
+    loadStudentReviews();
+    loadPendingReviewCount();
+    loadTags();
+  }, [loadPendingReviewCount, loadSavedItems, loadStudentReviews, loadTags]);
 
   const loadCourses = useCallback(async () => {
     if (!searchTerm.trim()) {
@@ -198,6 +382,90 @@ function App() {
     );
   }, [offerings, selectedCourse]);
 
+  const savedCourseIds = useMemo(
+    () => new Set(savedItems.courses.map((course) => String(course.course_id))),
+    [savedItems.courses],
+  );
+
+  const savedInstructorKeys = useMemo(
+    () =>
+      new Set(
+        savedItems.instructors.map(
+          (instructor) => `${instructor.course_id}:${instructor.prof_id}`,
+        ),
+      ),
+    [savedItems.instructors],
+  );
+
+  const selectedCourseCode = selectedCourse
+    ? `CMPT ${selectedCourse.course_number}`
+    : "";
+
+  const ownReviewsForSelectedProf = useMemo(() => {
+    if (!selectedProf) {
+      return [];
+    }
+
+    return studentReviews.filter((review) => {
+      const sameProfessor = String(review.prof_id) === String(selectedProf.prof_id);
+      const sameCourse =
+        !selectedCourseCode ||
+        !review.course_code_raw ||
+        review.course_code_raw === selectedCourseCode;
+
+      return sameProfessor && sameCourse;
+    });
+  }, [selectedCourseCode, selectedProf, studentReviews]);
+
+  const reviewNotifications = useMemo(
+    () =>
+      studentReviews.filter((review) =>
+        ["APPROVED", "REJECTED"].includes(review.status),
+      ),
+    [studentReviews],
+  );
+
+  const resetWorkspaceState = () => {
+    setSearchTerm("");
+    setCourses([]);
+    setLoadingCourses(false);
+    setSelectedCourse(null);
+    setOfferings([]);
+    setLoadingOfferings(false);
+    setSelectedProf(null);
+    setProfStats(null);
+    setProfReviews([]);
+    setLoadingProf(false);
+    setSavedItems({ courses: [], instructors: [] });
+    setSavedLoading(false);
+    setSavedError("");
+    setStudentReviews([]);
+    setStudentReviewsLoading(false);
+    setReviewForm({
+      review_text: "",
+      overall_score: 4,
+      is_anonymous: false,
+      tag_ids: [],
+    });
+    setReviewSubmitting(false);
+    setReviewError("");
+    setReviewMessage("");
+    setReviewNotice(null);
+    setReviewModalOpen(false);
+    setReviewModalCourseCode("");
+    setReviewMode("create");
+    setEditingReviewId(null);
+    setMyReviewsModalOpen(false);
+    setNotificationsModalOpen(false);
+    setPendingReviewCount(0);
+    setModerationModalOpen(false);
+    setPendingReviews([]);
+    setModerationHistoryModalOpen(false);
+    setModerationHistory([]);
+    setModerationLoading(false);
+    setModerationError("");
+  };
+
   const openAuthModal = (mode) => {
     setAuthMode(mode);
     setAuthError("");
@@ -219,6 +487,7 @@ function App() {
             })
           : await registerAccount(authForm);
 
+      resetWorkspaceState();
       setCurrentUser(response.user);
       setAuthModalOpen(false);
       setAuthForm({ display_name: "", email: "", password: "" });
@@ -280,15 +549,290 @@ function App() {
       await deleteUserAccount(currentUser.user_id);
       setCurrentUser(null);
       setProfileModalOpen(false);
-      setSelectedCourse(null);
-      setSelectedProf(null);
-      setProfStats(null);
-      setProfReviews([]);
-      setOfferings([]);
+      resetWorkspaceState();
     } catch (error) {
       setProfileError(error.message);
     } finally {
       setProfileLoading(false);
+    }
+  };
+
+  const requireStudentLogin = () => {
+    if (isStudent && currentUser?.user_id) {
+      return true;
+    }
+
+    openAuthModal("login");
+    return false;
+  };
+
+  const handleSaveSelectedCourse = async () => {
+    if (!selectedCourse || !requireStudentLogin()) {
+      return;
+    }
+
+    setSavedError("");
+    setSavedLoading(true);
+
+    try {
+      const response = await saveCourse(currentUser.user_id, selectedCourse.course_id);
+      setSavedItems(response.saved);
+    } catch (error) {
+      setSavedError(error.message);
+    } finally {
+      setSavedLoading(false);
+    }
+  };
+
+  const handleSaveSelectedInstructor = async () => {
+    if (!selectedCourse || !selectedProf || !requireStudentLogin()) {
+      return;
+    }
+
+    setSavedError("");
+    setSavedLoading(true);
+
+    try {
+      const response = await saveInstructor(
+        currentUser.user_id,
+        selectedCourse.course_id,
+        selectedProf.prof_id,
+      );
+      setSavedItems(response.saved);
+    } catch (error) {
+      setSavedError(error.message);
+    } finally {
+      setSavedLoading(false);
+    }
+  };
+
+  const handleRemoveSavedCourse = async (courseId) => {
+    if (!isStudent || !currentUser?.user_id) {
+      return;
+    }
+
+    setSavedError("");
+    setSavedLoading(true);
+
+    try {
+      const response = await removeSavedCourse(currentUser.user_id, courseId);
+      setSavedItems(response.saved);
+    } catch (error) {
+      setSavedError(error.message);
+    } finally {
+      setSavedLoading(false);
+    }
+  };
+
+  const handleRemoveSavedInstructor = async (courseId, profId) => {
+    if (!isStudent || !currentUser?.user_id) {
+      return;
+    }
+
+    setSavedError("");
+    setSavedLoading(true);
+
+    try {
+      const response = await removeSavedInstructor(currentUser.user_id, courseId, profId);
+      setSavedItems(response.saved);
+    } catch (error) {
+      setSavedError(error.message);
+    } finally {
+      setSavedLoading(false);
+    }
+  };
+
+  const openCreateReviewModal = () => {
+    setReviewMode("create");
+    setEditingReviewId(null);
+    setReviewModalCourseCode(selectedCourseCode);
+    setReviewForm({
+      review_text: "",
+      overall_score: 4,
+      is_anonymous: false,
+      tag_ids: [],
+    });
+    setReviewError("");
+    setReviewMessage("");
+    setMyReviewsModalOpen(false);
+    setReviewModalOpen(true);
+  };
+
+  const openEditReviewModal = (review) => {
+    if (review.status !== "PENDING") {
+      return;
+    }
+
+    setReviewMode("edit");
+    setEditingReviewId(review.review_id);
+    setSelectedProf({ prof_id: review.prof_id, prof_name: review.prof_name });
+    setReviewModalCourseCode(review.course_code_raw || "");
+    setReviewForm({
+      review_text: review.review_text || "",
+      overall_score: Number(review.overall_rating ?? 4),
+      is_anonymous: Boolean(review.is_anonymous),
+      tag_ids: parseTagIds(review.tag_ids),
+    });
+    setReviewError("");
+    setReviewMessage("");
+    setReviewModalOpen(true);
+  };
+
+  const toggleReviewTag = (tagId) => {
+    setReviewForm((current) => {
+      const hasTag = current.tag_ids.includes(tagId);
+      return {
+        ...current,
+        tag_ids: hasTag
+          ? current.tag_ids.filter((currentTagId) => currentTagId !== tagId)
+          : [...current.tag_ids, tagId],
+      };
+    });
+  };
+
+  const handleReviewSubmit = async (event) => {
+    event.preventDefault();
+    if (!selectedProf || !requireStudentLogin()) {
+      return;
+    }
+
+    setReviewSubmitting(true);
+    setReviewError("");
+    setReviewMessage("");
+
+    try {
+      const payload = {
+        prof_id: selectedProf.prof_id,
+        course_code_raw: reviewMode === "create" ? selectedCourseCode : reviewModalCourseCode,
+        review_text: reviewForm.review_text,
+        overall_score: reviewForm.overall_score,
+        is_anonymous: reviewForm.is_anonymous,
+        tag_ids: reviewForm.tag_ids,
+      };
+
+      if (reviewMode === "edit" && editingReviewId) {
+        await updateStudentReview(currentUser.user_id, editingReviewId, {
+          review_text: payload.review_text,
+          overall_score: payload.overall_score,
+          is_anonymous: payload.is_anonymous,
+          tag_ids: payload.tag_ids,
+        });
+        setReviewMessage("Pending review updated.");
+      } else {
+        await submitStudentReview(currentUser.user_id, payload);
+        setReviewMessage("Submitted. Your review is pending moderator approval.");
+      }
+
+      setReviewForm({
+        review_text: "",
+        overall_score: 4,
+        is_anonymous: false,
+        tag_ids: [],
+      });
+      setReviewMode("create");
+      setEditingReviewId(null);
+      setReviewModalCourseCode("");
+      setReviewModalOpen(false);
+      await loadStudentReviews();
+    } catch (error) {
+      setReviewError(error.message);
+    } finally {
+      setReviewSubmitting(false);
+    }
+  };
+
+  const handleDeleteOwnReview = async (reviewId) => {
+    if (!isStudent || !currentUser?.user_id) {
+      return;
+    }
+
+    setReviewError("");
+    setReviewMessage("");
+
+    try {
+      await deleteStudentReview(currentUser.user_id, reviewId);
+      setReviewMessage("Review deleted.");
+      await loadStudentReviews();
+      if (selectedProf) {
+        const reviews = await fetchProfessorReviews(selectedProf.prof_id);
+        setProfReviews(reviews);
+      }
+    } catch (error) {
+      setReviewError(error.message);
+    }
+  };
+
+  const loadPendingReviews = async () => {
+    if (!isModerator) {
+      return;
+    }
+
+    setModerationLoading(true);
+    setModerationError("");
+
+    try {
+      const data = await fetchPendingReviews();
+      setPendingReviews(data);
+    } catch (error) {
+      setModerationError(error.message);
+      setPendingReviews([]);
+    } finally {
+      setModerationLoading(false);
+    }
+  };
+
+  const handleOpenModeration = async () => {
+    setModerationModalOpen(true);
+    await loadPendingReviews();
+  };
+
+  const handleOpenModerationHistory = async () => {
+    if (!isModerator || !currentUser?.user_id) {
+      return;
+    }
+
+    setModerationHistoryModalOpen(true);
+    setModerationLoading(true);
+    setModerationError("");
+
+    try {
+      const data = await fetchModerationHistory(currentUser.user_id);
+      setModerationHistory(data);
+    } catch (error) {
+      setModerationHistory([]);
+      setModerationError(error.message);
+    } finally {
+      setModerationLoading(false);
+    }
+  };
+
+  const handleModerateReview = async (reviewId, actionTaken) => {
+    if (!isModerator || !currentUser?.user_id) {
+      return;
+    }
+
+    setModerationLoading(true);
+    setModerationError("");
+
+    try {
+      await moderateReview(reviewId, {
+        moderator_id: currentUser.user_id,
+        action_taken: actionTaken,
+      });
+      await loadPendingReviews();
+      await loadPendingReviewCount();
+      if (moderationHistoryModalOpen) {
+        const history = await fetchModerationHistory(currentUser.user_id);
+        setModerationHistory(history);
+      }
+      if (selectedProf) {
+        const reviews = await fetchProfessorReviews(selectedProf.prof_id);
+        setProfReviews(reviews);
+      }
+    } catch (error) {
+      setModerationError(error.message);
+    } finally {
+      setModerationLoading(false);
     }
   };
 
@@ -297,6 +841,7 @@ function App() {
     setProfileModalOpen(false);
     setProfileError("");
     setProfileMessage("");
+    resetWorkspaceState();
   };
 
   return (
@@ -318,6 +863,21 @@ function App() {
         </div>
       </div>
 
+      {reviewNotice && (
+        <div className={`review-toast ${reviewNotice.status.toLowerCase()}`}>
+          <strong>
+            Review {reviewNotice.status === "APPROVED" ? "accepted" : "rejected"}
+          </strong>
+          <p>
+            {reviewNotice.courseCode ? `${reviewNotice.courseCode} ` : ""}
+            {reviewNotice.profName ? `with ${reviewNotice.profName}` : ""}
+            {reviewNotice.status === "APPROVED"
+              ? " is now public."
+              : " was not approved."}
+          </p>
+        </div>
+      )}
+
       <main className={`home-page ${showHome ? "show" : ""}`}>
         <header className="topbar">
           <div className="topbar-brand">
@@ -332,6 +892,44 @@ function App() {
                   <strong>{currentUser.display_name}</strong>
                   <span>{currentUser.role}</span>
                 </div>
+                {isStudent && (
+                  <>
+                    <button
+                      type="button"
+                      className="topbar-button notification-button"
+                      onClick={() => setNotificationsModalOpen(true)}
+                    >
+                      Review Updates
+                      <span>{reviewNotifications.length}</span>
+                    </button>
+                    <button
+                      type="button"
+                      className="topbar-button light"
+                      onClick={() => setMyReviewsModalOpen(true)}
+                    >
+                      My Reviews
+                    </button>
+                  </>
+                )}
+                {isModerator && (
+                  <>
+                    <button
+                      type="button"
+                      className="topbar-button moderator-alert"
+                      onClick={handleOpenModeration}
+                    >
+                      Reviews Pending
+                      <span>{pendingReviewCount}</span>
+                    </button>
+                    <button
+                      type="button"
+                      className="topbar-button light"
+                      onClick={handleOpenModerationHistory}
+                    >
+                      History
+                    </button>
+                  </>
+                )}
                 <button
                   type="button"
                   className="topbar-button light"
@@ -419,6 +1017,69 @@ function App() {
               </div>
             )}
 
+            {isStudent && (
+              <section className="saved-panel">
+                <div className="saved-panel-head">
+                  <div>
+                    <h3>Saved</h3>
+                    <p>Your courses and instructor picks load automatically.</p>
+                  </div>
+                  {savedLoading && <span className="mini-status">Syncing</span>}
+                </div>
+
+                {savedError && <p className="form-error">{savedError}</p>}
+
+                {savedItems.courses.length === 0 &&
+                savedItems.instructors.length === 0 ? (
+                  <p className="saved-empty">Nothing saved yet.</p>
+                ) : (
+                  <div className="saved-list">
+                    {savedItems.courses.map((course) => (
+                      <div key={`course-${course.course_id}`} className="saved-item">
+                        <div>
+                          <span className="saved-kicker">Course</span>
+                          <strong>CMPT {course.course_number}</strong>
+                          <p>{course.course_title}</p>
+                        </div>
+                        <button
+                          type="button"
+                          className="saved-remove"
+                          onClick={() => handleRemoveSavedCourse(course.course_id)}
+                        >
+                          Remove
+                        </button>
+                      </div>
+                    ))}
+
+                    {savedItems.instructors.map((instructor) => (
+                      <div
+                        key={`instructor-${instructor.course_id}-${instructor.prof_id}`}
+                        className="saved-item"
+                      >
+                        <div>
+                          <span className="saved-kicker">Instructor</span>
+                          <strong>{instructor.prof_name}</strong>
+                          <p>CMPT {instructor.course_number} - {instructor.course_title}</p>
+                        </div>
+                        <button
+                          type="button"
+                          className="saved-remove"
+                          onClick={() =>
+                            handleRemoveSavedInstructor(
+                              instructor.course_id,
+                              instructor.prof_id,
+                            )
+                          }
+                        >
+                          Remove
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </section>
+            )}
+
             <div className="course-list">
               {!searchTerm.trim() ? (
                 <div className="panel-empty">
@@ -471,9 +1132,26 @@ function App() {
                     <h2>CMPT {selectedCourse.course_number}</h2>
                     <p className="detail-title">{selectedCourse.course_title}</p>
                   </div>
-                  <span className="section-count">
-                    {offerings.length} section{offerings.length !== 1 ? "s" : ""}
-                  </span>
+                  <div className="detail-actions">
+                    <span className="section-count">
+                      {offerings.length} section{offerings.length !== 1 ? "s" : ""}
+                    </span>
+                    {!isModerator && (
+                      <button
+                        type="button"
+                        className="save-action"
+                        onClick={handleSaveSelectedCourse}
+                        disabled={
+                          savedLoading ||
+                          savedCourseIds.has(String(selectedCourse.course_id))
+                        }
+                      >
+                        {savedCourseIds.has(String(selectedCourse.course_id))
+                          ? "Saved"
+                          : "Save Course"}
+                      </button>
+                    )}
+                  </div>
                 </div>
 
                 <div className="prof-section">
@@ -559,6 +1237,25 @@ function App() {
                       </p>
                     )}
                   </div>
+                  {!isModerator && selectedCourse && (
+                    <button
+                      type="button"
+                      className="save-action prof-save"
+                      onClick={handleSaveSelectedInstructor}
+                      disabled={
+                        savedLoading ||
+                        savedInstructorKeys.has(
+                          `${selectedCourse.course_id}:${selectedProf.prof_id}`,
+                        )
+                      }
+                    >
+                      {savedInstructorKeys.has(
+                        `${selectedCourse.course_id}:${selectedProf.prof_id}`,
+                      )
+                        ? "Saved"
+                        : "Save Instructor"}
+                    </button>
+                  )}
                 </div>
 
                 {profStats && (
@@ -583,7 +1280,111 @@ function App() {
                 )}
 
                 <div className="reviews-section">
-                  <h4>Reviews ({profReviews.length})</h4>
+                  {isStudent ? (
+                    <div className="review-action-bar">
+                      <div>
+                        <h4>Reviews ({profReviews.length})</h4>
+                        <p>Read what students said, or add your own after taking it.</p>
+                      </div>
+                      <button
+                        type="button"
+                        className="topbar-button composer-button"
+                        onClick={openCreateReviewModal}
+                      >
+                        Write a Review
+                      </button>
+                    </div>
+                  ) : !currentUser ? (
+                    <div className="review-action-bar">
+                      <div>
+                        <h4>Reviews ({profReviews.length})</h4>
+                        <p>Log in as a student to write a review.</p>
+                      </div>
+                      <button
+                        type="button"
+                        className="topbar-button composer-button"
+                        onClick={() => openAuthModal("login")}
+                      >
+                        Log In
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="review-action-bar">
+                      <div>
+                        <h4>Reviews ({profReviews.length})</h4>
+                        <p>Moderator accounts can review submissions from the top bar.</p>
+                      </div>
+                    </div>
+                  )}
+
+                  {reviewError && !reviewModalOpen && <p className="form-error">{reviewError}</p>}
+                  {reviewMessage && !reviewModalOpen && (
+                    <p className="form-success compact-success">{reviewMessage}</p>
+                  )}
+
+                  {isStudent && (
+                    <div className="own-review-list">
+                      <h4>Your Submissions</h4>
+                      {studentReviewsLoading ? (
+                        <p className="no-reviews">Loading your review statuses...</p>
+                      ) : ownReviewsForSelectedProf.length === 0 ? (
+                        <p className="no-reviews">
+                          You have not submitted a review for this instructor yet.
+                        </p>
+                      ) : (
+                        ownReviewsForSelectedProf.map((review) => (
+                          <div key={review.review_id} className="review-card own-review">
+                            <div className="review-top">
+                              <span className={`status-pill ${String(review.status || "").toLowerCase()}`}>
+                                {review.status === "APPROVED"
+                                  ? "Accepted"
+                                  : review.status === "REJECTED"
+                                    ? "Rejected"
+                                    : "Pending approval"}
+                              </span>
+                              <span className="review-date">
+                                {review.created_at
+                                  ? new Date(review.created_at).toLocaleDateString()
+                                  : ""}
+                              </span>
+                            </div>
+                            <p className="review-body">{review.review_text}</p>
+                            <p className="review-visibility">
+                              Posted as {review.is_anonymous ? "Anonymous" : "your name"}
+                            </p>
+                            {review.tags && (
+                              <div className="review-tags">
+                                {review.tags.split(", ").map((tag) => (
+                                  <span key={tag} className="tag-chip">
+                                    {tag}
+                                  </span>
+                                ))}
+                              </div>
+                            )}
+                            <div className="review-card-actions">
+                              {review.status === "PENDING" && (
+                                <button
+                                  type="button"
+                                  className="saved-remove inline-remove"
+                                  onClick={() => openEditReviewModal(review)}
+                                >
+                                  Edit Review
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                className="saved-remove inline-remove"
+                                onClick={() => handleDeleteOwnReview(review.review_id)}
+                              >
+                                Delete Review
+                              </button>
+                            </div>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  )}
+
                   {profReviews.length === 0 ? (
                     <p className="no-reviews">No approved reviews yet.</p>
                   ) : (
@@ -623,6 +1424,265 @@ function App() {
           </div>
         </div>
       </main>
+
+      {reviewModalOpen && isStudent && selectedProf && (
+        <div className="modal-backdrop" onClick={() => setReviewModalOpen(false)}>
+          <div
+            className="modal-card review-modal-card"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="modal-head">
+              <div>
+                <h3>{reviewMode === "edit" ? "Edit Pending Review" : "Write a Review"}</h3>
+                <p>
+                  {reviewModalCourseCode ? `${reviewModalCourseCode} with ` : ""}
+                  {selectedProf.prof_name}. It stays pending until a moderator approves it.
+                </p>
+              </div>
+              <button
+                type="button"
+                className="modal-close"
+                onClick={() => setReviewModalOpen(false)}
+              >
+                x
+              </button>
+            </div>
+
+            <form className="modal-form review-composer" onSubmit={handleReviewSubmit}>
+              <textarea
+                value={reviewForm.review_text}
+                onChange={(event) =>
+                  setReviewForm((current) => ({
+                    ...current,
+                    review_text: event.target.value,
+                  }))
+                }
+                placeholder={`How was ${selectedProf.prof_name} for ${reviewModalCourseCode || "this course"}?`}
+                minLength={8}
+                required
+              />
+              <div className="rating-slider-card">
+                <div className="rating-slider-head">
+                  <span>Overall Rating</span>
+                  <strong>{Number(reviewForm.overall_score).toFixed(1)}/5</strong>
+                </div>
+                <input
+                  type="range"
+                  min="0"
+                  max="5"
+                  step="0.5"
+                  value={reviewForm.overall_score}
+                  onChange={(event) =>
+                    setReviewForm((current) => ({
+                      ...current,
+                      overall_score: Number(event.target.value),
+                    }))
+                  }
+                  aria-label="Overall rating out of 5"
+                />
+                <div className="rating-scale">
+                  <span>0</span>
+                  <span>2.5</span>
+                  <span>5</span>
+                </div>
+              </div>
+              <label className="anonymous-toggle">
+                <input
+                  type="checkbox"
+                  checked={reviewForm.is_anonymous}
+                  onChange={(event) =>
+                    setReviewForm((current) => ({
+                      ...current,
+                      is_anonymous: event.target.checked,
+                    }))
+                  }
+                />
+                <span>
+                  Post as Anonymous
+                  <small>
+                    Moderators can still review it, but students will not see your name.
+                  </small>
+                </span>
+              </label>
+              <div className="review-tag-picker">
+                <div className="review-tag-picker-head">
+                  <span>Quick Tags</span>
+                  <small>Optional</small>
+                </div>
+                <div className="review-tag-options">
+                  {availableTags.map((tag) => (
+                    <button
+                      type="button"
+                      key={tag.tag_id}
+                      className={
+                        reviewForm.tag_ids.includes(tag.tag_id)
+                          ? "tag-option active"
+                          : "tag-option"
+                      }
+                      onClick={() => toggleReviewTag(tag.tag_id)}
+                    >
+                      {tag.tag_name}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              {reviewError && <p className="form-error">{reviewError}</p>}
+              <div className="modal-actions">
+                <button
+                  type="submit"
+                  className="topbar-button composer-button"
+                  disabled={reviewSubmitting}
+                >
+                  {reviewSubmitting
+                    ? "Saving..."
+                    : reviewMode === "edit"
+                      ? "Save Pending Review"
+                      : "Submit for Approval"}
+                </button>
+                <button
+                  type="button"
+                  className="text-button"
+                  onClick={() => setReviewModalOpen(false)}
+                >
+                  Cancel
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {myReviewsModalOpen && isStudent && (
+        <div className="modal-backdrop" onClick={() => setMyReviewsModalOpen(false)}>
+          <div
+            className="modal-card review-list-modal"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="modal-head">
+              <div>
+                <h3>My Reviews</h3>
+                <p>Track every review you submitted and edit pending ones.</p>
+              </div>
+              <button
+                type="button"
+                className="modal-close"
+                onClick={() => setMyReviewsModalOpen(false)}
+              >
+                x
+              </button>
+            </div>
+
+            <div className="review-management-list">
+              {studentReviewsLoading ? (
+                <p className="no-reviews">Loading your reviews...</p>
+              ) : studentReviews.length === 0 ? (
+                <p className="no-reviews">You have not submitted any reviews yet.</p>
+              ) : (
+                studentReviews.map((review) => (
+                  <article key={review.review_id} className="managed-review-card">
+                    <div className="managed-review-head">
+                      <div>
+                        <strong>{review.prof_name || "Unknown instructor"}</strong>
+                        <p>{review.course_code_raw || "Course not specified"}</p>
+                      </div>
+                      <span className={`status-pill ${String(review.status || "").toLowerCase()}`}>
+                        {review.status === "APPROVED"
+                          ? "Accepted"
+                          : review.status === "REJECTED"
+                            ? "Rejected"
+                            : "Pending"}
+                      </span>
+                    </div>
+                    <p className="review-body">{review.review_text}</p>
+                    <div className="managed-review-meta">
+                      <span>{review.overall_rating ?? "-"} / 5</span>
+                      <span>{review.is_anonymous ? "Anonymous" : "Name shown"}</span>
+                      <span>
+                        {review.created_at
+                          ? new Date(review.created_at).toLocaleDateString()
+                          : ""}
+                      </span>
+                    </div>
+                    {review.tags && (
+                      <div className="review-tags">
+                        {review.tags.split(", ").map((tag) => (
+                          <span key={tag} className="tag-chip">
+                            {tag}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                    <div className="review-card-actions">
+                      {review.status === "PENDING" && (
+                        <button
+                          type="button"
+                          className="topbar-button small-action"
+                          onClick={() => openEditReviewModal(review)}
+                        >
+                          Edit Pending
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        className="danger-button reject-button"
+                        onClick={() => handleDeleteOwnReview(review.review_id)}
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  </article>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {notificationsModalOpen && isStudent && (
+        <div className="modal-backdrop" onClick={() => setNotificationsModalOpen(false)}>
+          <div
+            className="modal-card review-list-modal"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="modal-head">
+              <div>
+                <h3>Review Updates</h3>
+                <p>Accepted and rejected review decisions from moderators.</p>
+              </div>
+              <button
+                type="button"
+                className="modal-close"
+                onClick={() => setNotificationsModalOpen(false)}
+              >
+                x
+              </button>
+            </div>
+
+            <div className="review-management-list">
+              {reviewNotifications.length === 0 ? (
+                <p className="no-reviews">No accepted or rejected review updates yet.</p>
+              ) : (
+                reviewNotifications.map((review) => (
+                  <article key={review.review_id} className="notification-row">
+                    <span className={`status-pill ${String(review.status || "").toLowerCase()}`}>
+                      {review.status === "APPROVED" ? "Accepted" : "Rejected"}
+                    </span>
+                    <div>
+                      <strong>{review.prof_name || "Unknown instructor"}</strong>
+                      <p>
+                        {review.course_code_raw || "Course not specified"} -{" "}
+                        {review.status === "APPROVED"
+                          ? "Your review is now public."
+                          : "Your review was not approved."}
+                      </p>
+                    </div>
+                  </article>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {authModalOpen && (
         <div className="modal-backdrop" onClick={() => setAuthModalOpen(false)}>
@@ -812,6 +1872,124 @@ function App() {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {moderationModalOpen && isModerator && (
+        <div className="modal-backdrop" onClick={() => setModerationModalOpen(false)}>
+          <div
+            className="modal-card moderation-card"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="modal-head">
+              <div>
+                <h3>Pending Reviews</h3>
+                <p>Accepting a review makes it public. Rejecting keeps it hidden.</p>
+              </div>
+              <button
+                type="button"
+                className="modal-close"
+                onClick={() => setModerationModalOpen(false)}
+              >
+                x
+              </button>
+            </div>
+
+            <div className="moderation-body">
+              {moderationError && <p className="form-error">{moderationError}</p>}
+              {moderationLoading && pendingReviews.length === 0 ? (
+                <p className="no-reviews">Loading pending reviews...</p>
+              ) : pendingReviews.length === 0 ? (
+                <p className="no-reviews">No pending reviews right now.</p>
+              ) : (
+                pendingReviews.map((review) => (
+                  <article key={review.review_id} className="moderation-review">
+                    <div className="moderation-meta">
+                      <strong>{review.student_username || "Student"}</strong>
+                      <span>{review.prof_name || "Unknown instructor"}</span>
+                      <span>{review.course_code_raw || "Course not specified"}</span>
+                      <span>
+                        {review.created_at
+                          ? new Date(review.created_at).toLocaleString()
+                          : ""}
+                      </span>
+                    </div>
+                    <p>{review.review_text}</p>
+                    <div className="moderation-actions">
+                      <button
+                        type="button"
+                        className="topbar-button accept-button"
+                        onClick={() => handleModerateReview(review.review_id, "APPROVED")}
+                        disabled={moderationLoading}
+                      >
+                        Accept
+                      </button>
+                      <button
+                        type="button"
+                        className="danger-button reject-button"
+                        onClick={() => handleModerateReview(review.review_id, "REJECTED")}
+                        disabled={moderationLoading}
+                      >
+                        Reject
+                      </button>
+                    </div>
+                  </article>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {moderationHistoryModalOpen && isModerator && (
+        <div
+          className="modal-backdrop"
+          onClick={() => setModerationHistoryModalOpen(false)}
+        >
+          <div
+            className="modal-card moderation-card"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="modal-head">
+              <div>
+                <h3>Moderation History</h3>
+                <p>Recent accepted, rejected, and changed review decisions.</p>
+              </div>
+              <button
+                type="button"
+                className="modal-close"
+                onClick={() => setModerationHistoryModalOpen(false)}
+              >
+                x
+              </button>
+            </div>
+
+            <div className="moderation-body">
+              {moderationError && <p className="form-error">{moderationError}</p>}
+              {moderationLoading && moderationHistory.length === 0 ? (
+                <p className="no-reviews">Loading moderation history...</p>
+              ) : moderationHistory.length === 0 ? (
+                <p className="no-reviews">No moderation actions recorded yet.</p>
+              ) : (
+                moderationHistory.map((entry) => (
+                  <article key={entry.moderation_id} className="moderation-review">
+                    <div className="moderation-meta">
+                      <strong>{entry.action_taken}</strong>
+                      <span>{entry.prof_name || "Unknown instructor"}</span>
+                      <span>{entry.course_code_raw || "Course not specified"}</span>
+                      <span>{entry.student_username || "Student"}</span>
+                      <span>
+                        {entry.action_time
+                          ? new Date(entry.action_time).toLocaleString()
+                          : ""}
+                      </span>
+                    </div>
+                    <p>{entry.review_text}</p>
+                  </article>
+                ))
+              )}
+            </div>
           </div>
         </div>
       )}
