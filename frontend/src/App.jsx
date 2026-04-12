@@ -105,6 +105,7 @@ function App() {
   const [savedItems, setSavedItems] = useState({ courses: [], instructors: [] });
   const [savedLoading, setSavedLoading] = useState(false);
   const [savedError, setSavedError] = useState("");
+  const [savedModalOpen, setSavedModalOpen] = useState(false);
 
   const [studentReviews, setStudentReviews] = useState([]);
   const [studentReviewsLoading, setStudentReviewsLoading] = useState(false);
@@ -333,6 +334,19 @@ function App() {
     }
   };
 
+  const handleOpenSavedCourse = async (course) => {
+    setSavedModalOpen(false);
+    setSearchTerm(course.course_number);
+    await handleSelectCourse(course);
+  };
+
+  const handleOpenSavedInstructor = async (instructor) => {
+    setSavedModalOpen(false);
+    setSearchTerm(instructor.course_number);
+    await handleSelectCourse(instructor);
+    await handleSelectProf(instructor.prof_id, instructor.prof_name);
+  };
+
   const uniqueProfs = useMemo(() => {
     if (!selectedCourse) {
       return [];
@@ -415,6 +429,7 @@ function App() {
     setSavedItems({ courses: [], instructors: [] });
     setSavedLoading(false);
     setSavedError("");
+    setSavedModalOpen(false);
     setStudentReviews([]);
     setStudentReviewsLoading(false);
     setReviewForm({
@@ -854,6 +869,13 @@ function App() {
                   <>
                     <button
                       type="button"
+                      className="topbar-button light"
+                      onClick={() => setSavedModalOpen(true)}
+                    >
+                      Saved
+                    </button>
+                    <button
+                      type="button"
                       className="topbar-button notification-button"
                       onClick={() => setNotificationsModalOpen(true)}
                     >
@@ -973,69 +995,6 @@ function App() {
                   delete the account with cascade cleanup.
                 </p>
               </div>
-            )}
-
-            {isStudent && (
-              <section className="saved-panel">
-                <div className="saved-panel-head">
-                  <div>
-                    <h3>Saved</h3>
-                    <p>Your courses and instructor picks load automatically.</p>
-                  </div>
-                  {savedLoading && <span className="mini-status">Syncing</span>}
-                </div>
-
-                {savedError && <p className="form-error">{savedError}</p>}
-
-                {savedItems.courses.length === 0 &&
-                savedItems.instructors.length === 0 ? (
-                  <p className="saved-empty">Nothing saved yet.</p>
-                ) : (
-                  <div className="saved-list">
-                    {savedItems.courses.map((course) => (
-                      <div key={`course-${course.course_id}`} className="saved-item">
-                        <div>
-                          <span className="saved-kicker">Course</span>
-                          <strong>CMPT {course.course_number}</strong>
-                          <p>{course.course_title}</p>
-                        </div>
-                        <button
-                          type="button"
-                          className="saved-remove"
-                          onClick={() => handleRemoveSavedCourse(course.course_id)}
-                        >
-                          Remove
-                        </button>
-                      </div>
-                    ))}
-
-                    {savedItems.instructors.map((instructor) => (
-                      <div
-                        key={`instructor-${instructor.course_id}-${instructor.prof_id}`}
-                        className="saved-item"
-                      >
-                        <div>
-                          <span className="saved-kicker">Instructor</span>
-                          <strong>{instructor.prof_name}</strong>
-                          <p>CMPT {instructor.course_number} - {instructor.course_title}</p>
-                        </div>
-                        <button
-                          type="button"
-                          className="saved-remove"
-                          onClick={() =>
-                            handleRemoveSavedInstructor(
-                              instructor.course_id,
-                              instructor.prof_id,
-                            )
-                          }
-                        >
-                          Remove
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </section>
             )}
 
             <div className="course-list">
@@ -1466,6 +1425,90 @@ function App() {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {savedModalOpen && isStudent && (
+        <div className="modal-backdrop" onClick={() => setSavedModalOpen(false)}>
+          <div
+            className="modal-card saved-modal-card"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="modal-head">
+              <div>
+                <h3>Saved</h3>
+                <p>Open saved courses and instructors from here.</p>
+              </div>
+              <button
+                type="button"
+                className="modal-close"
+                onClick={() => setSavedModalOpen(false)}
+              >
+                x
+              </button>
+            </div>
+
+            <div className="saved-modal-body">
+              {savedLoading && <p className="no-reviews">Syncing saved items...</p>}
+              {savedError && <p className="form-error">{savedError}</p>}
+              {savedItems.courses.length === 0 &&
+              savedItems.instructors.length === 0 ? (
+                <p className="saved-empty">Nothing saved yet.</p>
+              ) : (
+                <div className="saved-list">
+                  {savedItems.courses.map((course) => (
+                    <div key={`course-${course.course_id}`} className="saved-item">
+                      <button
+                        type="button"
+                        className="saved-item-main"
+                        onClick={() => handleOpenSavedCourse(course)}
+                      >
+                        <span className="saved-kicker">Course</span>
+                        <strong>CMPT {course.course_number}</strong>
+                        <p>{course.course_title}</p>
+                      </button>
+                      <button
+                        type="button"
+                        className="saved-remove"
+                        onClick={() => handleRemoveSavedCourse(course.course_id)}
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  ))}
+
+                  {savedItems.instructors.map((instructor) => (
+                    <div
+                      key={`instructor-${instructor.course_id}-${instructor.prof_id}`}
+                      className="saved-item"
+                    >
+                      <button
+                        type="button"
+                        className="saved-item-main"
+                        onClick={() => handleOpenSavedInstructor(instructor)}
+                      >
+                        <span className="saved-kicker">Instructor</span>
+                        <strong>{instructor.prof_name}</strong>
+                        <p>CMPT {instructor.course_number} - {instructor.course_title}</p>
+                      </button>
+                      <button
+                        type="button"
+                        className="saved-remove"
+                        onClick={() =>
+                          handleRemoveSavedInstructor(
+                            instructor.course_id,
+                            instructor.prof_id,
+                          )
+                        }
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
         </div>
       )}
