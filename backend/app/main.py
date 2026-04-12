@@ -51,14 +51,6 @@ def startup_tasks():
     ensure_cascade_constraints()
 
 
-@app.get("/debug/columns/{table}")
-def debug_columns(table: str):
-    allowed = {"review", "studentuser", "ratingscore", "ratingcriterion", "tag", "tagged_with"}
-    if table not in allowed:
-        raise HTTPException(400, "not allowed")
-    return fetch_all(f"SHOW COLUMNS FROM `{table}`", ())
-
-
 @app.get("/health/db")
 def health_db():
     try:
@@ -390,35 +382,6 @@ class AccountUpdate(BaseModel):
     password: Optional[str] = None
 
 
-class PlanCreate(BaseModel):
-    student_id: int
-    offering_id: int
-
-
-class ReviewScoreIn(BaseModel):
-    criterion_id: int
-    score: float = Field(..., ge=0, le=5)
-
-
-class ReviewCreate(BaseModel):
-    student_id: int
-    review_text: str
-    prof_id: Optional[int] = None
-    external_prof_id: Optional[int] = None
-    course_code_raw: Optional[str] = None
-    source: str = "APP"
-    status: str = "PENDING"
-    is_anonymous: bool = False
-    scores: List[ReviewScoreIn]
-    tag_ids: List[int] = []
-
-
-class ReviewUpdate(BaseModel):
-    review_text: Optional[str] = None
-    course_code_raw: Optional[str] = None
-    status: Optional[str] = None
-
-
 class ModerationUpdate(BaseModel):
     moderator_id: int
     action_taken: str
@@ -447,6 +410,10 @@ class StudentReviewUpdate(BaseModel):
     overall_score: Optional[float] = Field(default=None, ge=0, le=5)
     is_anonymous: Optional[bool] = None
     tag_ids: Optional[List[int]] = None
+
+
+class ReviewStatusUpdate(BaseModel):
+    status: str
 
 
 # =========================================================
@@ -503,16 +470,6 @@ def login_account(payload: LoginRequest):
     return {"message": "Login successful", "user": row}
 
 
-@app.get("/users/{user_id}")
-def get_user_account(user_id: int):
-    row = fetch_account_by_user_id(user_id)
-
-    if not row:
-        raise HTTPException(status_code=404, detail="User not found")
-
-    return row
-
-
 @app.patch("/users/{user_id}")
 def update_user_account(user_id: int, payload: AccountUpdate):
     current = fetch_one("SELECT user_id, email FROM user WHERE user_id = %s", (user_id,))
@@ -551,31 +508,6 @@ def delete_user_account(user_id: int):
 
     execute_write("DELETE FROM user WHERE user_id = %s", (user_id,))
     return {"message": "Account deleted", "user_id": user_id}
-
-
-@app.post("/students/register")
-def register_student(payload: StudentRegister):
-    return register_account(payload)
-
-
-@app.post("/students/login")
-def login_student(payload: LoginRequest):
-    row = fetch_account_by_credentials(payload.email, payload.password)
-
-    if not row or row["role"] != ACCOUNT_ROLE_STUDENT:
-        raise HTTPException(status_code=401, detail="Invalid credentials")
-
-    return {"message": "Login successful", "user": row}
-
-
-@app.post("/moderators/login")
-def login_moderator(payload: LoginRequest):
-    row = fetch_account_by_credentials(payload.email, payload.password)
-
-    if not row or row["role"] != ACCOUNT_ROLE_MODERATOR:
-        raise HTTPException(status_code=401, detail="Invalid credentials")
-
-    return {"message": "Login successful", "user": row}
 
 
 # =========================================================
@@ -663,46 +595,6 @@ def search_offerings(
     )
 
 
-@app.get("/offerings/{offering_id}")
-def get_offering(offering_id: int):
-    row = fetch_one(
-        """
-        SELECT
-            so.offering_id,
-            so.section_no,
-            so.year,
-            so.term,
-            so.delivery_mode,
-            c.course_id,
-            c.course_number,
-            c.course_title,
-            p.prof_id,
-            p.prof_name,
-            pem.external_prof_id,
-            pem.match_type,
-            pem.confidence_score,
-            ep.source AS external_source,
-            ep.external_id,
-            ep.prof_name AS external_prof_name,
-            ep.avg_rating AS rmp_avg_rating,
-            ep.avg_diff AS rmp_avg_difficulty,
-            ep.review_count AS rmp_review_count
-        FROM sectionoffering so
-        JOIN course c ON c.course_id = so.course_id
-        JOIN professor p ON p.prof_id = so.prof_id
-        LEFT JOIN professor_external_match pem ON pem.prof_id = p.prof_id
-        LEFT JOIN external_professor ep ON ep.external_prof_id = pem.external_prof_id
-        WHERE so.offering_id = %s
-        """,
-        (offering_id,),
-    )
-
-    if not row:
-        raise HTTPException(status_code=404, detail="Offering not found")
-
-    return row
-
-
 @app.get("/professors/{prof_id}")
 def get_professor(prof_id: int):
     row = fetch_one(
@@ -774,97 +666,9 @@ def get_professor_reviews(prof_id: int, status: str = "APPROVED"):
     )
 
 
-@app.get("/reviews/{review_id}")
-def get_review_details(review_id: int):
-    review = fetch_one(
-        """
-        SELECT
-            review_id, source, prof_id, external_prof_id,
-            review_text, course_code_raw, status, is_anonymous, created_at
-        FROM review
-        WHERE review_id = %s
-        """,
-        (review_id,),
-    )
-
-    if not review:
-        raise HTTPException(status_code=404, detail="Review not found")
-
-    scores = fetch_all(
-        """
-        SELECT rc.criterion_id, rc.criterion_name, rs.score
-        FROM ratingscore rs
-        JOIN ratingcriterion rc ON rc.criterion_id = rs.criterion_id
-        WHERE rs.review_id = %s
-        ORDER BY rc.criterion_name
-        """,
-        (review_id,),
-    )
-
-    tags = fetch_all(
-        """
-        SELECT t.tag_id, t.tag_name
-        FROM tagged_with tw
-        JOIN tag t ON t.tag_id = tw.tag_id
-        WHERE tw.review_id = %s
-        ORDER BY t.tag_name
-        """,
-        (review_id,),
-    )
-
-    return {**review, "scores": scores, "tags": tags}
-
-
 @app.get("/tags")
 def get_tags():
     return fetch_all("SELECT tag_id, tag_name FROM tag ORDER BY tag_name")
-
-
-# =========================================================
-# Plans
-# =========================================================
-
-@app.get("/students/{student_id}/plans")
-def get_student_plans(student_id: int):
-    return fetch_all(
-        """
-        SELECT
-            p.studentuser_id AS student_id,
-            so.offering_id,
-            c.course_number,
-            c.course_title,
-            so.section_no,
-            so.year,
-            so.term,
-            so.delivery_mode,
-            prof.prof_name
-        FROM plans p
-        JOIN sectionoffering so ON so.offering_id = p.offering_id
-        JOIN course c ON c.course_id = so.course_id
-        JOIN professor prof ON prof.prof_id = so.prof_id
-        WHERE p.studentuser_id = %s
-        ORDER BY so.year DESC, FIELD(LOWER(so.term), 'spring', 'summer', 'fall'), c.course_number, so.section_no
-        """,
-        (student_id,),
-    )
-
-
-@app.post("/plans")
-def add_plan(payload: PlanCreate):
-    execute_write(
-        "INSERT INTO plans (studentuser_id, offering_id) VALUES (%s, %s)",
-        (payload.student_id, payload.offering_id),
-    )
-    return {"message": "Plan added"}
-
-
-@app.delete("/plans")
-def remove_plan(student_id: int = Query(...), offering_id: int = Query(...)):
-    execute_write(
-        "DELETE FROM plans WHERE studentuser_id = %s AND offering_id = %s",
-        (student_id, offering_id),
-    )
-    return {"message": "Plan removed"}
 
 
 # =========================================================
@@ -1194,56 +998,6 @@ def update_student_review(student_id: int, review_id: int, payload: StudentRevie
 
     return {"message": "Pending review updated", "review_id": review_id}
 
-@app.post("/reviews")
-def create_review(payload: ReviewCreate):
-    conn = get_connection()
-    cursor = conn.cursor(dictionary=True)
-
-    try:
-        conn.start_transaction()
-
-        cursor.execute(
-            """
-            INSERT INTO review
-            (source, studentuser_id, prof_id, external_prof_id, review_text, course_code_raw, status, is_anonymous)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-            """,
-            (
-                payload.source,
-                payload.student_id,
-                payload.prof_id,
-                payload.external_prof_id,
-                payload.review_text,
-                payload.course_code_raw,
-                payload.status.upper(),
-                payload.is_anonymous,
-            ),
-        )
-
-        review_id = cursor.lastrowid
-
-        for score in payload.scores:
-            cursor.execute(
-                "INSERT INTO ratingscore (review_id, criterion_id, score) VALUES (%s, %s, %s)",
-                (review_id, score.criterion_id, score.score),
-            )
-
-        for tag_id in payload.tag_ids:
-            cursor.execute(
-                "INSERT INTO tagged_with (review_id, tag_id) VALUES (%s, %s)",
-                (review_id, tag_id),
-            )
-
-        conn.commit()
-        return {"message": "Review created", "review_id": review_id}
-
-    except Exception as exc:
-        conn.rollback()
-        raise HTTPException(status_code=500, detail=str(exc))
-    finally:
-        cursor.close()
-        conn.close()
-
 
 @app.delete("/students/{student_id}/reviews/{review_id}")
 def delete_student_review(student_id: int, review_id: int):
@@ -1261,31 +1015,6 @@ def delete_student_review(student_id: int, review_id: int):
     )
 
     return {"message": "Review deleted", "review_id": review_id}
-
-
-@app.patch("/reviews/{review_id}")
-def update_review(review_id: int, payload: ReviewUpdate):
-    current = fetch_one("SELECT review_id FROM review WHERE review_id = %s", (review_id,))
-    if not current:
-        raise HTTPException(status_code=404, detail="Review not found")
-
-    execute_write(
-        """
-        UPDATE review
-        SET review_text = COALESCE(%s, review_text),
-            course_code_raw = COALESCE(%s, course_code_raw),
-            status = COALESCE(%s, status)
-        WHERE review_id = %s
-        """,
-        (
-            payload.review_text,
-            payload.course_code_raw,
-            payload.status.upper() if payload.status else None,
-            review_id,
-        ),
-    )
-
-    return {"message": "Review updated"}
 
 
 # =========================================================
@@ -1423,14 +1152,44 @@ def moderate_review(review_id: int, payload: ModerationUpdate):
 
 
 # ---------------------------------------------------------
-# DELETE CASCADE demo endpoint
-# Your DB must also define ON DELETE CASCADE on the review
-# foreign keys for this rubric item to fully count.
+# UPDATE operation demo
 # ---------------------------------------------------------
-@app.delete("/admin/reviews/{review_id}")
-def delete_review(review_id: int):
-    execute_write("DELETE FROM review WHERE review_id = %s", (review_id,))
-    return {"message": "Review deleted"}
+@app.patch("/analytics/demo/reviews/{review_id}/status")
+def update_review_status_demo(review_id: int, payload: ReviewStatusUpdate):
+    next_status = payload.status.upper().strip()
+    if next_status not in {"APPROVED", "REJECTED", "HIDDEN", "REMOVED", "PENDING"}:
+        raise HTTPException(status_code=400, detail="Invalid status value")
+
+    current = fetch_one(
+        """
+        SELECT review_id, studentuser_id AS student_id, prof_id, status, created_at
+        FROM review
+        WHERE review_id = %s
+        """,
+        (review_id,),
+    )
+    if not current:
+        raise HTTPException(status_code=404, detail="Review not found")
+
+    execute_write(
+        "UPDATE review SET status = %s WHERE review_id = %s",
+        (next_status, review_id),
+    )
+
+    updated = fetch_one(
+        """
+        SELECT review_id, studentuser_id AS student_id, prof_id, status, created_at
+        FROM review
+        WHERE review_id = %s
+        """,
+        (review_id,),
+    )
+
+    return {
+        "message": "Review status updated",
+        "before": current,
+        "after": updated,
+    }
 
 
 # =========================================================
@@ -1512,47 +1271,116 @@ def professor_averages_by_course(course_number: str):
 
 # ---------------------------------------------------------
 # DIVISION query demo
-# Students who planned ALL offerings of a given course
+# Professors who taught in ALL three main terms (Spring, Summer, Fall)
+# in a given year — classic relational division.
 # ---------------------------------------------------------
-@app.get("/analytics/students/planned-all-sections")
-def students_planned_all_sections(course_id: int):
+@app.get("/analytics/professors/all-terms")
+def professors_all_terms(course_number: str, year: int = 2025):
     return fetch_all(
         """
-        SELECT s.student_id, s.username, s.email
-        FROM (
-            SELECT su.user_id AS student_id, u.display_name AS username, u.email
-            FROM studentuser su
-            JOIN user u ON u.user_id = su.user_id
-        ) s
+        SELECT p.prof_id, p.prof_name
+        FROM professor p
         WHERE EXISTS (
             SELECT 1
             FROM sectionoffering so
-            WHERE so.course_id = %s
+            JOIN course c ON c.course_id = so.course_id
+            WHERE so.prof_id = p.prof_id
+              AND c.course_number = %s
         )
         AND NOT EXISTS (
-            SELECT so.offering_id
-            FROM sectionoffering so
-            WHERE so.course_id = %s
-              AND NOT EXISTS (
-                  SELECT 1
-                  FROM plans p
-                  WHERE p.studentuser_id = s.student_id
-                    AND p.offering_id = so.offering_id
-              )
+            SELECT 1
+            FROM (
+                SELECT 'spring' AS term
+                UNION ALL SELECT 'summer'
+                UNION ALL SELECT 'fall'
+            ) required_terms
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM sectionoffering so
+                WHERE so.prof_id = p.prof_id
+                  AND so.year = %s
+                  AND LOWER(so.term) = required_terms.term
+            )
         )
-        ORDER BY s.username
+        ORDER BY p.prof_name
         """,
-        (course_id, course_id),
+        (course_number, year),
     )
 
 
-@app.get("/analytics/course-offering-counts")
-def course_offering_counts():
-    return fetch_all(
+def get_student_dependent_counts(student_id: int):
+    return fetch_one(
         """
-        SELECT year, term, COUNT(*) AS offering_count
-        FROM sectionoffering
-        GROUP BY year, term
-        ORDER BY year DESC, FIELD(LOWER(term), 'spring', 'summer', 'fall')
-        """
+        SELECT
+            (SELECT COUNT(*) FROM studentuser WHERE user_id = %s) AS student_rows,
+            (SELECT COUNT(*) FROM plans WHERE studentuser_id = %s) AS plans_rows,
+            (SELECT COUNT(*) FROM review WHERE studentuser_id = %s) AS review_rows,
+            (
+                SELECT COUNT(*)
+                FROM ratingscore rs
+                JOIN review r ON r.review_id = rs.review_id
+                WHERE r.studentuser_id = %s
+            ) AS ratingscore_rows,
+            (
+                SELECT COUNT(*)
+                FROM tagged_with tw
+                JOIN review r ON r.review_id = tw.review_id
+                WHERE r.studentuser_id = %s
+            ) AS tagged_with_rows,
+            (
+                SELECT COUNT(*)
+                FROM moderate mo
+                JOIN review r ON r.review_id = mo.review_id
+                WHERE r.studentuser_id = %s
+            ) AS moderate_rows,
+            (SELECT COUNT(*) FROM saved_courses WHERE studentuser_id = %s) AS saved_courses_rows,
+            (SELECT COUNT(*) FROM saved_instructors WHERE studentuser_id = %s) AS saved_instructors_rows
+        """,
+        (
+            student_id,
+            student_id,
+            student_id,
+            student_id,
+            student_id,
+            student_id,
+            student_id,
+            student_id,
+        ),
     )
+
+
+# ---------------------------------------------------------
+# DELETE operation with CASCADE demo
+# Deletes a user row and shows cascading deletes in child tables.
+# ---------------------------------------------------------
+@app.delete("/analytics/demo/students/{student_id}/cascade-delete")
+def cascade_delete_student_demo(student_id: int):
+    student = fetch_one(
+        """
+        SELECT su.user_id AS student_id, u.display_name, u.email
+        FROM studentuser su
+        JOIN user u ON u.user_id = su.user_id
+        WHERE su.user_id = %s
+        """,
+        (student_id,),
+    )
+    if not student:
+        raise HTTPException(status_code=404, detail="Student not found")
+
+    before = get_student_dependent_counts(student_id)
+
+    execute_write("DELETE FROM user WHERE user_id = %s", (student_id,))
+
+    after = get_student_dependent_counts(student_id)
+    user_exists = fetch_one("SELECT user_id FROM user WHERE user_id = %s", (student_id,))
+
+    return {
+        "message": "Student deleted; cascade applied to dependent rows",
+        "student": student,
+        "before_counts": before,
+        "after_counts": after,
+        "user_still_exists": bool(user_exists),
+    }
+
+
+

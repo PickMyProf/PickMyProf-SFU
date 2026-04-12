@@ -2,14 +2,17 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import "./App.css";
 import PMPLogo from "./assets/PMPLogo.png";
 import {
+  cascadeDeleteStudentDemo,
   deleteStudentReview,
   deleteUserAccount,
   fetchCourses,
+  fetchProfessorAveragesByCourse,
   fetchPendingReviewCount,
   fetchPendingReviews,
   fetchProfessorReviews,
   fetchProfessorStats,
   fetchSavedItems,
+  fetchProfessorsAllTerms,
   fetchStudentReviews,
   fetchModerationHistory,
   loginAccount,
@@ -21,6 +24,7 @@ import {
   saveInstructor,
   searchOfferings,
   submitStudentReview,
+  updateReviewStatusDemo,
   updateStudentReview,
   updateUserAccount,
 } from "./api";
@@ -62,6 +66,13 @@ function readStoredUser() {
   }
 }
 
+function getErrorMessage(error) {
+  if (error instanceof Error && error.message) {
+    return error.message;
+  }
+  return "Request failed";
+}
+
 function App() {
   const [fadeOut, setFadeOut] = useState(false);
   const [showHome, setShowHome] = useState(false);
@@ -75,6 +86,12 @@ function App() {
   const [selectedCourse, setSelectedCourse] = useState(null);
   const [offerings, setOfferings] = useState([]);
   const [loadingOfferings, setLoadingOfferings] = useState(false);
+  const [courseProfessorAverages, setCourseProfessorAverages] = useState([]);
+  const [loadingCourseProfessorAverages, setLoadingCourseProfessorAverages] =
+    useState(false);
+  const [allTermsProfessors, setAllTermsProfessors] = useState([]);
+  const [loadingAllTermsProfessors, setLoadingAllTermsProfessors] = useState(false);
+  const [courseQueryError, setCourseQueryError] = useState("");
 
   const [selectedProf, setSelectedProf] = useState(null);
   const [profStats, setProfStats] = useState(null);
@@ -117,6 +134,9 @@ function App() {
   const [reviewSubmitting, setReviewSubmitting] = useState(false);
   const [reviewError, setReviewError] = useState("");
   const [reviewMessage, setReviewMessage] = useState("");
+  const [queryDemoMessage, setQueryDemoMessage] = useState("");
+  const [queryDemoError, setQueryDemoError] = useState("");
+  const [queryDemoLoading, setQueryDemoLoading] = useState(false);
   const [reviewNotice, setReviewNotice] = useState(null);
   const [reviewModalOpen, setReviewModalOpen] = useState(false);
   const [reviewModalCourseCode, setReviewModalCourseCode] = useState("");
@@ -301,18 +321,52 @@ function App() {
     setSelectedProf(null);
     setProfStats(null);
     setProfReviews([]);
+    setCourseQueryError("");
+    setCourseProfessorAverages([]);
+    setAllTermsProfessors([]);
     setLoadingOfferings(true);
+    setLoadingCourseProfessorAverages(true);
+    setLoadingAllTermsProfessors(true);
 
-    try {
-      const data = await searchOfferings({ search: course.course_number });
+    const [joinResult, groupByResult, divisionResult] = await Promise.allSettled([
+      searchOfferings({ search: course.course_number }),
+      fetchProfessorAveragesByCourse(course.course_number),
+      fetchProfessorsAllTerms(course.course_number),
+    ]);
+
+    const errors = [];
+
+    if (joinResult.status === "fulfilled") {
       setOfferings(
-        data.filter((offering) => String(offering.course_id) === String(course.course_id)),
+        joinResult.value.filter(
+          (offering) => String(offering.course_id) === String(course.course_id),
+        ),
       );
-    } catch {
+    } else {
       setOfferings([]);
-    } finally {
-      setLoadingOfferings(false);
+      errors.push(`Join query failed: ${getErrorMessage(joinResult.reason)}`);
     }
+
+    if (groupByResult.status === "fulfilled") {
+      setCourseProfessorAverages(groupByResult.value);
+    } else {
+      setCourseProfessorAverages([]);
+      errors.push(
+        `Group-by aggregation failed: ${getErrorMessage(groupByResult.reason)}`,
+      );
+    }
+
+    if (divisionResult.status === "fulfilled") {
+      setAllTermsProfessors(divisionResult.value);
+    } else {
+      setAllTermsProfessors([]);
+      errors.push(`Division query failed: ${getErrorMessage(divisionResult.reason)}`);
+    }
+
+    setCourseQueryError(errors.join(" "));
+    setLoadingOfferings(false);
+    setLoadingCourseProfessorAverages(false);
+    setLoadingAllTermsProfessors(false);
   };
 
   const handleSelectProf = async (profId, profName) => {
@@ -422,6 +476,11 @@ function App() {
     setSelectedCourse(null);
     setOfferings([]);
     setLoadingOfferings(false);
+    setCourseProfessorAverages([]);
+    setLoadingCourseProfessorAverages(false);
+    setPlannedAllStudents([]);
+    setLoadingPlannedAllStudents(false);
+    setCourseQueryError("");
     setSelectedProf(null);
     setProfStats(null);
     setProfReviews([]);
@@ -440,6 +499,9 @@ function App() {
     setReviewSubmitting(false);
     setReviewError("");
     setReviewMessage("");
+    setQueryDemoMessage("");
+    setQueryDemoError("");
+    setQueryDemoLoading(false);
     setReviewNotice(null);
     setReviewModalOpen(false);
     setReviewModalCourseCode("");
@@ -536,7 +598,11 @@ function App() {
     setProfileError("");
 
     try {
-      await deleteUserAccount(currentUser.user_id);
+      if (currentUser.role === "STUDENT") {
+        await cascadeDeleteStudentDemo(currentUser.user_id);
+      } else {
+        await deleteUserAccount(currentUser.user_id);
+      }
       setCurrentUser(null);
       setProfileModalOpen(false);
       resetWorkspaceState();
@@ -732,6 +798,44 @@ function App() {
       }
     } catch (error) {
       setReviewError(error.message);
+    }
+  };
+
+  const handleWithdrawPendingReview = async (reviewId) => {
+    if (!isStudent || !currentUser?.user_id) {
+      return;
+    }
+
+    const confirmed = window.confirm(
+      "Withdraw this pending review? This uses the update demo endpoint and sets status to HIDDEN.",
+    );
+
+    if (!confirmed) {
+      return;
+    }
+
+    setQueryDemoLoading(true);
+    setQueryDemoError("");
+    setQueryDemoMessage("");
+    setReviewError("");
+    setReviewMessage("");
+
+    try {
+      const response = await updateReviewStatusDemo(reviewId, "HIDDEN");
+      const updatedStatus = response?.after?.status || "HIDDEN";
+      setQueryDemoMessage(
+        `Update demo completed: review ${reviewId} changed to ${updatedStatus}.`,
+      );
+      await loadStudentReviews();
+      if (selectedProf) {
+        const reviews = await fetchProfessorReviews(selectedProf.prof_id);
+        setProfReviews(reviews);
+      }
+    } catch (error) {
+      const message = getErrorMessage(error);
+      setQueryDemoError(message);
+    } finally {
+      setQueryDemoLoading(false);
     }
   };
 
@@ -1122,6 +1226,57 @@ function App() {
                     </div>
                   )}
                 </div>
+
+                <div className="query-demo-stack">
+                  <article className="query-demo-card">
+                    <h3 className="sub-heading">Top Professors</h3>
+                    {loadingCourseProfessorAverages ? (
+                      <p className="no-reviews">Loading professor averages...</p>
+                    ) : courseProfessorAverages.length === 0 ? (
+                      <p className="no-reviews">No averages found for this course.</p>
+                    ) : (
+                      <div className="query-demo-list">
+                        {courseProfessorAverages.slice(0, 5).map((row) => (
+                          <div
+                            key={`${row.course_id}-${row.prof_id}`}
+                            className="query-demo-row"
+                          >
+                            <strong>{row.prof_name}</strong>
+                            <span>
+                              Avg {row.app_avg_overall ?? "-"} / 5 ({row.app_review_count}{" "}
+                              reviews)
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </article>
+
+                  <article className="query-demo-card">
+                    <h3 className="sub-heading">Professors in All Terms (2025)</h3>
+                    {loadingAllTermsProfessors ? (
+                      <p className="no-reviews">Loading...</p>
+                    ) : allTermsProfessors.length === 0 ? (
+                      <p className="no-reviews">No professors taught all three terms in 2025.</p>
+                    ) : (
+                      <>
+                        <p className="query-demo-note">
+                          {allTermsProfessors.length} professor
+                          {allTermsProfessors.length !== 1 ? "s" : ""} taught Spring, Summer &amp; Fall 2025.
+                        </p>
+                        <div className="query-demo-list">
+                          {allTermsProfessors.slice(0, 5).map((prof) => (
+                            <div key={prof.prof_id} className="query-demo-row">
+                              <strong>{prof.prof_name}</strong>
+                            </div>
+                          ))}
+                        </div>
+                      </>
+                    )}
+                  </article>
+
+                  {courseQueryError && <p className="form-error">{courseQueryError}</p>}
+                </div>
               </>
             )}
           </div>
@@ -1238,6 +1393,12 @@ function App() {
                   {reviewMessage && !reviewModalOpen && (
                     <p className="form-success compact-success">{reviewMessage}</p>
                   )}
+                  {queryDemoError && !reviewModalOpen && (
+                    <p className="form-error">{queryDemoError}</p>
+                  )}
+                  {queryDemoMessage && !reviewModalOpen && (
+                    <p className="form-success compact-success">{queryDemoMessage}</p>
+                  )}
 
                   {isStudent && (
                     <div className="own-review-list">
@@ -1271,13 +1432,25 @@ function App() {
                             </p>
                             <div className="review-card-actions">
                               {review.status === "PENDING" && (
-                                <button
-                                  type="button"
-                                  className="saved-remove inline-remove"
-                                  onClick={() => openEditReviewModal(review)}
-                                >
-                                  Edit Review
-                                </button>
+                                <>
+                                  <button
+                                    type="button"
+                                    className="saved-remove inline-remove"
+                                    onClick={() => openEditReviewModal(review)}
+                                  >
+                                    Edit Review
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="saved-remove inline-remove"
+                                    onClick={() =>
+                                      handleWithdrawPendingReview(review.review_id)
+                                    }
+                                    disabled={queryDemoLoading}
+                                  >
+                                    {queryDemoLoading ? "Updating..." : "Withdraw (Update Demo)"}
+                                  </button>
+                                </>
                               )}
                               <button
                                 type="button"

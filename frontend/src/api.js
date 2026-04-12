@@ -53,6 +53,29 @@ export async function fetchProfessorStats(profId) {
   return request(`/analytics/professors/${profId}/stats`);
 }
 
+export async function fetchProfessorAveragesByCourse(courseNumber) {
+  return request(
+    `/analytics/professor-averages-by-course?course_number=${encodeURIComponent(courseNumber)}`,
+  );
+}
+
+export async function fetchProfessorsAllTerms(courseNumber, year = 2025) {
+  return request(`/analytics/professors/all-terms?course_number=${encodeURIComponent(courseNumber)}&year=${year}`);
+}
+
+export async function updateReviewStatusDemo(reviewId, status) {
+  return request(`/analytics/demo/reviews/${reviewId}/status`, {
+    method: "PATCH",
+    body: JSON.stringify({ status }),
+  });
+}
+
+export async function cascadeDeleteStudentDemo(studentId) {
+  return request(`/analytics/demo/students/${studentId}/cascade-delete`, {
+    method: "DELETE",
+  });
+}
+
 export async function loginAccount(payload) {
   return request("/auth/login", {
     method: "POST",
