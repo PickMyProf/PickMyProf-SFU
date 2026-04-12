@@ -47,6 +47,7 @@ def root():
 def startup_tasks():
     ensure_saved_tables()
     ensure_cascade_constraints()
+    ensure_triggers()
 
 
 @app.get("/health/db")
@@ -57,6 +58,20 @@ def health_db():
         return {"status": "ok", "db": "connected"}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/health/triggers")
+def health_triggers():
+    # lets us verify during the demo that the triggers actually exist in the db
+    rows = fetch_all(
+        """
+        SELECT TRIGGER_NAME, EVENT_MANIPULATION, EVENT_OBJECT_TABLE, ACTION_TIMING
+        FROM information_schema.TRIGGERS
+        WHERE TRIGGER_SCHEMA = DATABASE()
+        ORDER BY TRIGGER_NAME
+        """
+    )
+    return {"triggers": rows}
 
 
 @app.post("/admin/seed")
@@ -101,6 +116,69 @@ def seed_external(background_tasks: BackgroundTasks):
 
 # --- db helper functions ---
 # wrappers so we don't repeat the same try/finally/close pattern in every endpoint
+
+
+def ensure_triggers():
+    # BEFORE INSERT and BEFORE UPDATE triggers on ratingscore to enforce score range [0, 5]
+    # pydantic already validates this at the api level, but the db shouldn't just trust the app
+    # if anyone writes raw SQL or hits mysql directly, the trigger still blocks bad data
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            """
+            SELECT TRIGGER_NAME
+            FROM information_schema.TRIGGERS
+            WHERE TRIGGER_SCHEMA = DATABASE()
+              AND TRIGGER_NAME = 'trg_ratingscore_insert_check'
+            """
+        )
+        if not cursor.fetchone():
+            cursor.execute(
+                """
+                CREATE TRIGGER trg_ratingscore_insert_check
+                BEFORE INSERT ON ratingscore
+                FOR EACH ROW
+                BEGIN
+                    IF NEW.score < 0 OR NEW.score > 5 THEN
+                        SIGNAL SQLSTATE '45000'
+                            SET MESSAGE_TEXT = 'Rating score must be between 0 and 5';
+                    END IF;
+                END
+                """
+            )
+
+        cursor.execute(
+            """
+            SELECT TRIGGER_NAME
+            FROM information_schema.TRIGGERS
+            WHERE TRIGGER_SCHEMA = DATABASE()
+              AND TRIGGER_NAME = 'trg_ratingscore_update_check'
+            """
+        )
+        if not cursor.fetchone():
+            cursor.execute(
+                """
+                CREATE TRIGGER trg_ratingscore_update_check
+                BEFORE UPDATE ON ratingscore
+                FOR EACH ROW
+                BEGIN
+                    IF NEW.score < 0 OR NEW.score > 5 THEN
+                        SIGNAL SQLSTATE '45000'
+                            SET MESSAGE_TEXT = 'Rating score must be between 0 and 5';
+                    END IF;
+                END
+                """
+            )
+
+        conn.commit()
+    except Exception as exc:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        cursor.close()
+        conn.close()
+
 
 def fetch_all(sql: str, params: tuple = ()):
     # always returns a list, even if empty
