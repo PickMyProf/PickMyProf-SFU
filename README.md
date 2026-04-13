@@ -91,7 +91,23 @@ After running the command above, Vite will show a local URL, usually:
 
     source .venv/bin/activate
 
-### 4. Install dependencies
+### 4. Set up your environment variables
+
+Copy the example env file and fill in your database credentials:
+
+    cp .env.example .env
+
+Then open `backend/.env` and set your values:
+
+    DB_HOST=localhost
+    DB_PORT=3306
+    DB_USER=root
+    DB_PASSWORD=your_password_here
+    DB_NAME=pickmyprof
+
+> **The backend will not start without this file.** See `backend/.env.example` for the full template.
+
+### 5. Install dependencies
 
     pip install -r requirements.txt
 
